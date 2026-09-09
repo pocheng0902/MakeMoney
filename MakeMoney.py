@@ -131,7 +131,7 @@ def load_taiwan_stock_official_list():
 
 
 # ==========================================
-# 3. 核心抓取與算號邏輯
+# 3. 核心抓取與算號邏輯 (完全保留 PC 版)
 # ==========================================
 def fetch_chinese_name_online(stock_id: str) -> str:
     try:
@@ -457,18 +457,15 @@ def calculate_gap_levels(df: pd.DataFrame, max_lookback: int = 60) -> dict:
     return res
 
 
-# ==========================================
-# 擷取集保大戶動態（將千張大戶調整為集保大戶）
-# ==========================================
-def get_tdcc_shareholders_data(stock_id: str) -> dict:
-    start_date = (datetime.now() - timedelta(days=40)).strftime("%Y-%m-%d")
+def get_large_shareholders_data(stock_id: str) -> dict:
+    start_date = (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d")
     url = "https://api.finmindtrade.com/api/v4/data"
     params = {
         "dataset": "TaiwanStockDepositShare",
         "data_id": stock_id,
         "start_date": start_date,
     }
-    result = {"summary": "無集保數據", "score_change": 0, "signals": []}
+    result = {"summary": "無數據", "score_change": 0, "signals": []}
     try:
         res = requests.get(url, params=params, headers=HEADERS, timeout=4)
         data = res.json()
@@ -476,59 +473,54 @@ def get_tdcc_shareholders_data(stock_id: str) -> dict:
             df = pd.DataFrame(data["data"])
             unique_dates = sorted(df["date"].unique())
 
-            if len(unique_dates) >= 2:
+            if len(unique_dates) >= 1:
                 latest_date = unique_dates[-1]
-                prev_date = unique_dates[-2]
-
                 df_latest = df[df["date"] == latest_date]
-                df_prev = df[df["date"] == prev_date]
 
-                # 15 代表 1000張以上的集保大戶等級
                 large_latest = df_latest[
                     df_latest["holding_shares_level"] == 15
                 ]
-                large_prev = df_prev[df_prev["holding_shares_level"] == 15]
 
-                if not large_latest.empty and not large_prev.empty:
+                if not large_latest.empty:
                     ratio_now = float(large_latest["percent"].values[0])
-                    ratio_prev = float(large_prev["percent"].values[0])
-                    diff_ratio = ratio_now - ratio_prev
-
                     people_now = int(large_latest["people"].values[0])
-                    people_prev = int(large_prev["people"].values[0])
-                    diff_people = people_now - people_prev
 
-                    arrow_ratio = (
-                        "⬆️"
-                        if diff_ratio > 0
-                        else ("⬇️" if diff_ratio < 0 else "➡️")
-                    )
+                    if len(unique_dates) >= 2:
+                        prev_date = unique_dates[-2]
+                        df_prev = df[df["date"] == prev_date]
+                        large_prev = df_prev[df_prev["holding_shares_level"] == 15]
 
-                    trend_desc = (
-                        "籌碼趨向集中"
-                        if diff_ratio > 0
-                        else ("籌碼趨向鬆動" if diff_ratio < 0 else "籌碼持平")
-                    )
+                        if not large_prev.empty:
+                            ratio_prev = float(large_prev["percent"].values[0])
+                            people_prev = int(large_prev["people"].values[0])
+                            diff_ratio = ratio_now - ratio_prev
+                            diff_people = people_now - people_prev
 
-                    result["summary"] = (
-                        f"[{latest_date}] 持股比率: {ratio_now:.2f}% ({arrow_ratio} {diff_ratio:+.2f}%) | "
-                        f"人數: {people_now}人 ({diff_people:+}人) [{trend_desc}]"
-                    )
+                            arrow_ratio = (
+                                "⬆️"
+                                if diff_ratio > 0
+                                else ("⬇️" if diff_ratio < 0 else "➡️")
+                            )
 
-                    if diff_ratio >= 0.3:
-                        result["score_change"] = 2
-                        result["signals"].append(
-                            f"• [集保大戶] 最新期別({latest_date}) 大戶持股增加 {diff_ratio:+.2f}% 至 {ratio_now:.2f}% (籌碼集中 +2分)"
-                        )
-                    elif diff_ratio <= -0.3:
-                        result["score_change"] = -2
-                        result["signals"].append(
-                            f"• [集保大戶] 最新期別({latest_date}) 大戶持股減少 {diff_ratio:+.2f}% 至 {ratio_now:.2f}% (籌碼鬆動 -2分)"
-                        )
+                            result["summary"] = (
+                                f"[{latest_date}] 集保大戶: {ratio_now:.2f}% ({arrow_ratio} {diff_ratio:+.2f}%) | "
+                                f"人數: {people_now}人 ({diff_people:+}人)"
+                            )
+
+                            if diff_ratio >= 0.3:
+                                result["score_change"] = 2
+                                result["signals"].append(
+                                    f"• [集保大戶] 最新期({latest_date}) 集保大戶持股增加 {diff_ratio:+.2f}% 至 {ratio_now:.2f}% (+2分)"
+                                )
+                            elif diff_ratio <= -0.3:
+                                result["score_change"] = -2
+                                result["signals"].append(
+                                    f"• [集保大戶] 最新期({latest_date}) 集保大戶持股減少 {diff_ratio:+.2f}% 至 {ratio_now:.2f}% (-2分)"
+                                )
+                        else:
+                            result["summary"] = f"[{latest_date}] 集保大戶: {ratio_now:.2f}% | 人數: {people_now}人"
                     else:
-                        result["signals"].append(
-                            f"• [集保大戶] 最新期別({latest_date}) 大戶持股比率維持在 {ratio_now:.2f}% (變動幅度 {diff_ratio:+.2f}%)"
-                        )
+                        result["summary"] = f"[{latest_date}] 集保大戶: {ratio_now:.2f}% | 人數: {people_now}人"
     except Exception as e:
         print(f"集保大戶資料抓取失敗: {e}")
     return result
@@ -841,7 +833,7 @@ def analyze_trend(
     chip_df: pd.DataFrame,
     margin_data: dict,
     day_trade_data: dict,
-    tdcc_holders_data: dict,
+    large_holders_data: dict,
     group_status: dict,
     news_list: list,
     tech_data: dict,
@@ -855,10 +847,6 @@ def analyze_trend(
         signals.extend(tech_data["signals"])
     else:
         signals.append(f"• {tech_data['error']}")
-
-    # 加入集保大戶訊號與分數
-    score += tdcc_holders_data.get("score_change", 0)
-    signals.extend(tdcc_holders_data.get("signals", []))
 
     full_group = group_status.get("group_name", "台股市場類別")
     signals.append(
@@ -907,7 +895,7 @@ def analyze_trend(
 # 4. Streamlit Web UI 主介面
 # ==========================================
 st.title("📈 股市大亨 - 完整台股診斷系統 (Web版)")
-st.caption("同步證交所/櫃買中心官方產業類別，提供技術面、集保大戶動態與財務綜合診斷")
+st.caption("同步證交所/櫃買中心官方產業類別，提供技術面、大戶籌碼與財務綜合診斷")
 
 # 1. 搜尋區域
 with st.container():
@@ -935,8 +923,8 @@ if search_clicked or user_input:
             future_chip = executor.submit(get_chip_data, stock_id)
             future_margin = executor.submit(get_margin_trading_data, stock_id)
             future_day_trade = executor.submit(get_day_trading_data, stock_id)
-            future_tdcc_holders = executor.submit(
-                get_tdcc_shareholders_data, stock_id
+            future_large_holders = executor.submit(
+                get_large_shareholders_data, stock_id
             )
             future_group = executor.submit(get_group_status, stock_id)
             future_news = executor.submit(get_stock_news, stock_id)
@@ -945,7 +933,7 @@ if search_clicked or user_input:
             chip_df = future_chip.result()
             margin_data = future_margin.result()
             day_trade_data = future_day_trade.result()
-            tdcc_holders_data = future_tdcc_holders.result()
+            large_holders_data = future_large_holders.result()
             group_status = future_group.result()
             news_list = future_news.result()
 
@@ -956,7 +944,7 @@ if search_clicked or user_input:
                 chip_df,
                 margin_data,
                 day_trade_data,
-                tdcc_holders_data,
+                large_holders_data,
                 group_status,
                 news_list,
                 tech_data,
@@ -981,7 +969,7 @@ if search_clicked or user_input:
 
             st.markdown("---")
 
-            # 欄位展示區
+            # 補齊：所有細節欄位卡片展示
             c1, c2 = st.columns(2)
 
             with c1:
@@ -1012,12 +1000,19 @@ if search_clicked or user_input:
                     f"**📊 本益比/股淨比：** PE `{tech_data.get('pe_ratio', '無數據')}` | "
                     f"PB `{tech_data.get('pb_ratio', '無數據')}`"
                 )
-                # 已更新為集保大戶動態
-                st.markdown(f"**🏦 集保大戶動態：** {tdcc_holders_data.get('summary', '無數據')}")
+                st.markdown(f"**🐋 集保大戶動態：** {large_holders_data.get('summary', '無數據')}")
                 st.markdown(f"**💳 融資融券(近5日)：** {margin_data.get('summary', '無數據')}")
                 st.markdown(f"**⚡ 當沖動態：** {day_trade_data.get('summary', '無數據')}")
 
             st.markdown("---")
+
+            # --- 新增個股走勢圖區域 ---
+            df_chart = tech_data.get("df")
+            if df_chart is not None and not df_chart.empty:
+                st.subheader("📈 個股歷史走勢與均線圖 (近半年)")
+                chart_data = df_chart[["Close", "MA10", "MA20", "MA60"]].dropna(how="all")
+                st.line_chart(chart_data)
+                st.markdown("---")
 
             # --- 分頁：權重分析訊號 / 三大法人籌碼 / 最新新聞 ---
             tab1, tab2, tab3 = st.tabs(
