@@ -119,32 +119,11 @@ def load_taiwan_stock_official_list():
 ) = load_taiwan_stock_official_list()
 
 
-def fetch_chinese_name_online(stock_id: str) -> str:
-    try:
-        url = f"https://tw.stock.yahoo.com/quote/{stock_id}"
-        res = requests.get(url, headers=HEADERS, timeout=3)
-        soup = BeautifulSoup(res.text, "html.parser")
-        h1 = soup.find("h1")
-        if h1:
-            clean_name = re.sub(
-                r"\([^)]*\)|Yahoo|股市|行情|個股", "", h1.text.strip()
-            ).strip()
-            if clean_name and clean_name != stock_id:
-                return clean_name
-    except Exception:
-        pass
-    return "台股個股"
-
-
 def resolve_stock_info(input_str: str) -> tuple[str, str]:
     query = str(input_str).strip().replace(" ", "")
     if query.isdigit():
-        name = STOCK_CODE_TO_NAME.get(query)
-        if name:
-            return query, name
-        c_name = fetch_chinese_name_online(query)
-        STOCK_CODE_TO_NAME[query] = c_name
-        return query, c_name
+        name = STOCK_CODE_TO_NAME.get(query, "台股個股")
+        return query, name
 
     if query in STOCK_NAME_TO_CODE:
         return STOCK_NAME_TO_CODE[query], query
@@ -153,76 +132,85 @@ def resolve_stock_info(input_str: str) -> tuple[str, str]:
         if query in name or name in query:
             return code, name
 
-    return query, fetch_chinese_name_online(query)
+    return query, "台股個股"
 
 
-def get_realtime_quote(stock_id: str) -> dict:
-    quote = {
-        "current_price": 0.0,
-        "change": 0.0,
-        "pct_change": 0.0,
-        "summary": "即時行情載入中...",
-    }
+def get_realtime_quote(stock_id: str) -> float:
     try:
         url = f"https://tw.stock.yahoo.com/quote/{stock_id}"
-        res = requests.get(url, headers=HEADERS, timeout=3)
+        res = requests.get(url, headers=HEADERS, timeout=4)
         if res.status_code == 200:
             soup = BeautifulSoup(res.text, "html.parser")
-            price_el = soup.find(
-                "span",
-                class_=re.compile(
-                    r"Fz\(32px\)|Fz\(36px\)|Fz\(28px\)|C\(\$c-trend-.*?\)"
-                ),
-            ) or soup.find("span", {"data-price": True})
-            if price_el:
-                price_str = (
-                    price_el.get("data-price")
-                    or price_el.text.replace(",", "").strip()
-                )
-                price = float(price_str)
-                if price > 0:
-                    quote.update(
-                        {
-                            "current_price": price,
-                            "summary": f"最新價: ${price:.2f} [即時]",
-                        }
-                    )
+            # 依據 data-price 屬性或搜尋特定包含價格的標籤
+            price_el = soup.find("span", {"data-price": True})
+            if price_el and price_el.get("data-price"):
+                return float(price_el["data-price"])
+
+            # 備用方案：搜尋網頁中的價格字串
+            for el in soup.find_all(["span", "div"]):
+                if "Fz(32px)" in str(el) or "Fz(36px)" in str(el):
+                    txt = el.text.replace(",", "").strip()
+                    if re.match(r"^\d+(\.\d+)?$", txt):
+                        return float(txt)
     except Exception:
         pass
-    return quote
+    return 0.0
 
 
 def get_chip_and_institutional_data(stock_id: str) -> dict:
-    """擷取籌碼面資訊（法人買賣超、主力動向、融資券）"""
+    """強化版籌碼解析：改採純文字匹配避免標籤變化問題"""
     chip = {
-        "foreign_buy": "無數據",
-        "trust_buy": "無數據",
-        "dealer_buy": "無數據",
-        "major_buy": "無數據",
-        "margin_change": "無數據",
-        "short_change": "無數據",
+        "foreign_buy": "待更新",
+        "trust_buy": "待更新",
+        "dealer_buy": "待更新",
+        "major_buy": "待更新",
         "chip_score": 0,
         "chip_signals": [],
     }
+
     try:
         url = f"https://tw.stock.yahoo.com/quote/{stock_id}/institutional-trading"
-        res = requests.get(url, headers=HEADERS, timeout=3)
+        res = requests.get(url, headers=HEADERS, timeout=4)
         if res.status_code == 200:
             soup = BeautifulSoup(res.text, "html.parser")
-            # 解析三大法人買賣張數
-            rows = soup.find_all("div", class_=re.compile(r"table-row"))
-            for row in rows:
-                text = row.text
-                if "外資" in text:
-                    chip["foreign_buy"] = extract_buy_str(text)
-                elif "投信" in text:
-                    chip["trust_buy"] = extract_buy_str(text)
-                elif "自營商" in text:
-                    chip["dealer_buy"] = extract_buy_str(text)
-                elif "主力" in text:
-                    chip["major_buy"] = extract_buy_str(text)
+            text_content = soup.get_text()
 
-        # 計分機制
+            # 解析三大法人買賣超 (搜尋關鍵字與數字)
+            patterns = {
+                "foreign_buy": r"外資[^\d\-+]*?([-+]?\d[\d,]*)\s*張",
+                "trust_buy": r"投信[^\d\-+]*?([-+]?\d[\d,]*)\s*張",
+                "dealer_buy": r"自營商[^\d\-+]*?([-+]?\d[\d,]*)\s*張",
+                "major_buy": r"主力[^\d\-+]*?([-+]?\d[\d,]*)\s*張",
+            }
+
+            for key, pat in patterns.items():
+                match = re.search(pat, text_content)
+                if match:
+                    val_str = match.group(1).replace(",", "")
+                    try:
+                        val = int(val_str)
+                        if val > 0:
+                            chip[key] = f"買超 {val:,} 張"
+                        elif val < 0:
+                            chip[key] = f"賣超 {abs(val):,} 張"
+                        else:
+                            chip[key] = "無變化"
+                    except ValueError:
+                        pass
+
+            # 若無法透過正則捕獲，改為列舉表格行
+            if chip["foreign_buy"] == "待更新":
+                rows = soup.find_all("li") or soup.find_all("tr")
+                for row in rows:
+                    r_text = row.text.replace(" ", "")
+                    if "外資" in r_text:
+                        chip["foreign_buy"] = parse_row_value(r_text)
+                    elif "投信" in r_text:
+                        chip["trust_buy"] = parse_row_value(r_text)
+                    elif "自營商" in r_text:
+                        chip["dealer_buy"] = parse_row_value(r_text)
+
+        # 評分機制
         if "買超" in chip["foreign_buy"]:
             chip["chip_score"] += 2
             chip["chip_signals"].append(
@@ -244,67 +232,55 @@ def get_chip_and_institutional_data(stock_id: str) -> dict:
     return chip
 
 
-def extract_buy_str(text: str) -> str:
+def parse_row_value(text: str) -> str:
     nums = re.findall(r"[-+]?\d[\d,]*", text)
     if nums:
-        val = int(nums[0].replace(",", ""))
-        return f"買超 {val:,} 張" if val > 0 else f"賣超 {abs(val):,} 張"
-    return "無明顯變化"
-
-
-def get_group_status(stock_id: str) -> dict:
-    clean_stock_id = str(stock_id).strip()
-    market_type = STOCK_MARKET_TYPE.get(clean_stock_id, "台股")
-    official_ind = STOCK_OFFICIAL_INDUSTRY.get(
-        clean_stock_id, "電子/一般產業"
-    )
-    groups = STOCK_TO_GROUP.get(clean_stock_id, [])
-
-    if groups:
-        primary_group = groups[0]
-        category_title = f"[{market_type}] {official_ind} ({primary_group})"
-    else:
-        category_title = f"[{market_type}] {official_ind}"
-
-    return {"group_name": category_title}
+        try:
+            val = int(nums[0].replace(",", ""))
+            return f"買超 {val:,} 張" if val > 0 else f"賣超 {abs(val):,} 張"
+        except ValueError:
+            pass
+    return "無資料"
 
 
 def get_financial_and_analyst_data(ticker: yf.Ticker) -> dict:
-    info = ticker.info
     fin_data = {
-        "analyst_target": "無數據",
-        "revenue_yoy": "無數據",
-        "eps": "無數據",
-        "est_eps": "無數據",
-        "pe_ratio": "無數據",
-        "pb_ratio": "無數據",
+        "analyst_target": "暫無資料",
+        "revenue_yoy": "暫無資料",
+        "eps": "暫無資料",
+        "est_eps": "暫無資料",
+        "pe_ratio": "暫無資料",
+        "pb_ratio": "暫無資料",
         "fundamental_score": 0,
         "fundamental_signals": [],
     }
 
     try:
+        info = ticker.info or {}
+
         target_mean = info.get("targetMeanPrice")
-        if target_mean:
+        if target_mean and float(target_mean) > 0:
             fin_data["analyst_target"] = f"${target_mean:.2f}"
 
         pe = info.get("trailingPE")
-        pb = info.get("priceToBook")
         if pe:
-            fin_data["pe_ratio"] = f"{pe:.2f} 倍"
+            fin_data["pe_ratio"] = f"{float(pe):.2f} 倍"
+
+        pb = info.get("priceToBook")
         if pb:
-            fin_data["pb_ratio"] = f"{pb:.2f} 倍"
+            fin_data["pb_ratio"] = f"{float(pb):.2f} 倍"
 
         est_eps = info.get("forwardEps")
         if est_eps:
-            fin_data["est_eps"] = f"${est_eps:.2f}"
+            fin_data["est_eps"] = f"${float(est_eps):.2f}"
 
         eps = info.get("trailingEps")
         if eps is not None:
-            fin_data["eps"] = f"${eps:.2f}"
+            fin_data["eps"] = f"${float(eps):.2f}"
 
         rev_growth = info.get("revenueGrowth")
         if rev_growth is not None:
-            rev_yoy_pct = rev_growth * 100
+            rev_yoy_pct = float(rev_growth) * 100
             fin_data["revenue_yoy"] = f"{rev_yoy_pct:+.2f}%"
             if rev_yoy_pct > 15:
                 fin_data["fundamental_score"] += 3
@@ -324,24 +300,28 @@ def get_financial_and_analyst_data(ticker: yf.Ticker) -> dict:
 
 def get_tech_data(stock_id: str, stock_name: str) -> dict:
     try:
-        ticker_symbol = f"{stock_id}.TW"
-        ticker = yf.Ticker(ticker_symbol)
+        # 上市 (.TW) / 上櫃 (.TWO) 自動嘗試
+        df = pd.DataFrame()
+        ticker = yf.Ticker(f"{stock_id}.TW")
         df = ticker.history(period="6mo")
 
         if df.empty:
-            ticker_symbol = f"{stock_id}.TWO"
-            ticker = yf.Ticker(ticker_symbol)
+            ticker = yf.Ticker(f"{stock_id}.TWO")
             df = ticker.history(period="6mo")
 
-        if df.empty or len(df) < 20:
+        if df.empty or len(df) < 10:
             return {
-                "error": f"無法獲取股票代碼 {stock_id} ({stock_name}) 充足的歷史數據"
+                "error": f"無法獲取股票代碼 {stock_id} ({stock_name}) 充足的歷史數據，請確認代碼是否正確。"
             }
 
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
-        realtime_quote = get_realtime_quote(stock_id)
+        rt_price = get_realtime_quote(stock_id)
+        latest_close = (
+            rt_price if rt_price > 0 else float(df["Close"].iloc[-1])
+        )
+
         fin_data = get_financial_and_analyst_data(ticker)
         chip_data = get_chip_and_institutional_data(stock_id)
 
@@ -350,19 +330,22 @@ def get_tech_data(stock_id: str, stock_name: str) -> dict:
         df["MA60"] = df["Close"].rolling(window=60).mean()
 
         latest = df.iloc[-1]
-        close_price = realtime_quote["current_price"] or latest["Close"]
         latest_date_str = df.index[-1].strftime("%Y-%m-%d")
 
-        ma20 = latest["MA20"]
-        ma60 = latest["MA60"] if not pd.isna(latest["MA60"]) else ma20
-        bias_20 = ((close_price - ma20) / ma20) * 100
+        ma20 = (
+            float(latest["MA20"])
+            if not pd.isna(latest["MA20"])
+            else latest_close
+        )
+        ma60 = float(latest["MA60"]) if not pd.isna(latest["MA60"]) else ma20
+        bias_20 = ((latest_close - ma20) / ma20) * 100
 
         signals = []
         total_score = fin_data["fundamental_score"] + chip_data["chip_score"]
         signals.extend(fin_data["fundamental_signals"])
         signals.extend(chip_data["chip_signals"])
 
-        if close_price >= ma20 and close_price >= ma60:
+        if latest_close >= ma20 and latest_close >= ma60:
             ma_analysis_str = f"處於多頭格局，月線(${ma20:.1f}) 與季線(${ma60:.1f}) 為下檔強支撐"
             signals.append(f"• [均線支撐] {ma_analysis_str}")
         else:
@@ -370,24 +353,23 @@ def get_tech_data(stock_id: str, stock_name: str) -> dict:
             signals.append(f"• [均線狀態] {ma_analysis_str}")
 
         trend_status = "盤整態勢"
-        if close_price > ma20 and ma20 > ma60:
+        if latest_close > ma20 and ma20 > ma60:
             trend_status = "強勢多頭"
             total_score += 3
-        elif close_price < ma20 and ma20 < ma60:
+        elif latest_close < ma20 and ma20 < ma60:
             trend_status = "弱勢空頭"
             total_score -= 3
 
-        high_6m = df["High"].max()
-        low_6m = df["Low"].min()
+        high_6m = float(df["High"].max())
+        low_6m = float(df["Low"].min())
         diff = high_6m - low_6m
 
-        # 目標價推算 (黃金切割率)
-        bull_target = close_price + (diff * 0.382)
-        bear_target = max(0.0, close_price - (diff * 0.382))
+        bull_target = latest_close + (diff * 0.382)
+        bear_target = max(0.0, latest_close - (diff * 0.382))
 
         return {
             "stock_name": stock_name,
-            "close_price": close_price,
+            "close_price": latest_close,
             "latest_date": latest_date_str,
             "trend_status": trend_status,
             "score": total_score,
@@ -402,7 +384,7 @@ def get_tech_data(stock_id: str, stock_name: str) -> dict:
             "chips": chip_data,
         }
     except Exception as e:
-        return {"error": f"資料處理異常: {e}"}
+        return {"error": f"資料讀取失敗: {e}"}
 
 
 # ---------------- UI 畫面配置 ----------------
@@ -413,18 +395,26 @@ user_input = st.text_input(
 )
 
 if st.button("開始全面診斷", type="primary"):
-    with st.spinner("正在調閱籌碼、基本面與技術面數據..."):
+    with st.spinner("正在讀取並解析即時籌碼與財務數據..."):
         stock_id, stock_name = resolve_stock_info(user_input)
         tech_data = get_tech_data(stock_id, stock_name)
 
         if "error" in tech_data:
             st.error(tech_data["error"])
         else:
-            group_status = get_group_status(stock_id)
+            market_type = STOCK_MARKET_TYPE.get(stock_id, "台股")
+            official_ind = STOCK_OFFICIAL_INDUSTRY.get(stock_id, "一般產業")
+            groups = STOCK_TO_GROUP.get(stock_id, [])
+            group_display = (
+                f"[{market_type}] {official_ind} ({groups[0]})"
+                if groups
+                else f"[{market_type}] {official_ind}"
+            )
+
             fin = tech_data["financials"]
             chip = tech_data["chips"]
 
-            # 1. 頂部主卡片
+            # 1. 主數據列
             col1, col2, col3, col4 = st.columns(4)
             col1.metric("標的名稱", f"{stock_id} {stock_name}")
             col2.metric("最新收盤/即時價", f"${tech_data['close_price']:.2f}")
@@ -433,20 +423,16 @@ if st.button("開始全面診斷", type="primary"):
 
             st.markdown("---")
 
-            # 2. 產業與技術層面詳細指標
+            # 2. 技術與產業
             st.subheader("📌 產業與技術指標")
-            st.write(
-                f"**所屬產業族群**：{group_status['group_name']}"
-            )
+            st.write(f"**所屬產業族群**：{group_display}")
             st.write(f"**均線排列結構**：{tech_data['ma_analysis']}")
 
             col_t1, col_t2, col_t3, col_t4 = st.columns(4)
             col_t1.metric("20MA 乖離率", tech_data["bias_str"])
             col_t2.metric("近 6 個月最高", f"${tech_data['high_6m']:.2f}")
             col_t3.metric("近 6 個月最低", f"${tech_data['low_6m']:.2f}")
-            col_t4.metric(
-                "法人平均目標價", fin["analyst_target"]
-            )
+            col_t4.metric("法人平均目標價", fin["analyst_target"])
 
             col_tg1, col_tg2 = st.columns(2)
             col_tg1.metric(
@@ -460,9 +446,8 @@ if st.button("開始全面診斷", type="primary"):
 
             st.markdown("---")
 
-            # 3. 籌碼面與基本面完整資料
+            # 3. 籌碼與基本面
             st.subheader("📊 籌碼面與基本面數據")
-
             tab1, tab2 = st.tabs(["🏛️ 法人與主力籌碼", "💰 基本面財務指標"])
 
             with tab1:
@@ -485,7 +470,7 @@ if st.button("開始全面診斷", type="primary"):
 
             st.markdown("---")
 
-            # 4. 綜合訊號導覽
+            # 4. 診斷訊號
             st.subheader("🔍 綜合診斷訊號與建議")
             for sig in tech_data["signals"]:
                 st.write(sig)
