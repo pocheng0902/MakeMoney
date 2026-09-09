@@ -613,98 +613,95 @@ def get_financial_and_analyst_data(ticker: yf.Ticker) -> dict:
     return fin_data
 
 
-def get_margin_trading_data(stock_id: str) -> dict:
+def get_margin_trading_data(stock_id: str, days: int = 20) -> dict:
+    """透過 FinMind API 抓取融資融券真實數據"""
     result = {
         "summary": "無數據",
         "signals": [],
         "margin_df": pd.DataFrame(),
     }
     try:
-        url = f"https://tw.stock.yahoo.com/quote/{stock_id}/margin"
-        res = requests.get(url, headers=HEADERS, timeout=4)
-        if res.status_code == 200:
-            soup = BeautifulSoup(res.text, "html.parser")
-            text = soup.get_text()
+        start_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        url = "https://api.finmindtrade.com/api/v4/data"
+        params = {
+            "dataset": "TaiwanStockMarginPurchaseShortSale",
+            "data_id": stock_id,
+            "start_date": start_date,
+        }
+        res = requests.get(url, params=params, headers=HEADERS, timeout=5)
+        data = res.json()
 
-            m_balance, s_balance = 0, 0
-            m_match = re.search(r"融資餘額[^\d]*([\d,]+)", text)
-            if m_match:
-                m_balance = int(m_match.group(1).replace(",", ""))
+        if data.get("msg") == "success" and data.get("data"):
+            df = pd.DataFrame(data["data"])
+            if not df.empty:
+                df = df.sort_values("date", ascending=False)
+                latest = df.iloc[0]
 
-            s_match = re.search(r"融券餘額[^\d]*([\d,]+)", text)
-            if s_match:
-                s_balance = int(s_match.group(1).replace(",", ""))
+                # 取出融資餘額與融券餘額 (FinMind 單位為股/張數)
+                m_balance = int(latest.get("MarginPurchaseTodayBalance", 0))
+                m_diff = int(latest.get("MarginPurchaseBuy", 0)) - int(latest.get("MarginPurchaseSell", 0))
+                s_balance = int(latest.get("ShortSaleTodayBalance", 0))
+                s_diff = int(latest.get("ShortSaleBuy", 0)) - int(latest.get("ShortSaleSell", 0))
 
-            m_diff_match = re.search(r"融資增減[^\d\-+]*([-+]?\d[\d,]*)", text)
-            s_diff_match = re.search(r"融券增減[^\d\-+]*([-+]?\d[\d,]*)", text)
+                result["summary"] = (
+                    f"[{latest['date']}] 融資餘額: {m_balance:,}張 ({m_diff:+,}張) | "
+                    f"融券餘額: {s_balance:,}張 ({s_diff:+,}張)"
+                )
 
-            m_diff = (
-                int(m_diff_match.group(1).replace(",", ""))
-                if m_diff_match
-                else 0
-            )
-            s_diff = (
-                int(s_diff_match.group(1).replace(",", ""))
-                if s_diff_match
-                else 0
-            )
-
-            result["summary"] = (
-                f"融資餘額: {m_balance:,}張 ({m_diff:+,}張) | "
-                f"融券餘額: {s_balance:,}張 ({s_diff:+,}張)"
-            )
-
-            today_str = datetime.now().strftime("%Y-%m-%d")
-            display_df = pd.DataFrame(
-                [
-                    {
-                        "日期": today_str,
-                        "融資餘額(張)": f"{m_balance:,}",
-                        "融資增減(張)": f"{m_diff:+,}",
-                        "融券餘額(張)": f"{s_balance:,}",
-                        "融券增減(張)": f"{s_diff:+,}",
-                    }
-                ]
-            )
-            result["margin_df"] = display_df
+                # 建立前幾日明細表
+                df_display = df.head(10).copy()
+                df_display["融資增減"] = df_display["MarginPurchaseBuy"] - df_display["MarginPurchaseSell"]
+                df_display["融券增減"] = df_display["ShortSaleBuy"] - df_display["ShortSaleSell"]
+                
+                df_display = df_display[[
+                    "date", "MarginPurchaseTodayBalance", "融資增減", 
+                    "ShortSaleTodayBalance", "融券增減"
+                ]]
+                df_display.columns = ["日期", "融資餘額(張)", "融資增減(張)", "融券餘額(張)", "融券增減(張)"]
+                result["margin_df"] = df_display
     except Exception as e:
-        print(f"融資融券抓取失敗: {e}")
+        print(f"FinMind 融資融券抓取失敗: {e}")
     return result
 
 
-def get_day_trading_data(stock_id: str) -> dict:
+def get_day_trading_data(stock_id: str, days: int = 20) -> dict:
+    """透過 FinMind API 抓取當沖交易真實數據"""
     result = {
         "summary": "無數據",
         "signals": [],
         "day_trade_df": pd.DataFrame(),
     }
     try:
-        url = f"https://tw.stock.yahoo.com/quote/{stock_id}"
-        res = requests.get(url, headers=HEADERS, timeout=4)
-        if res.status_code == 200:
-            text = BeautifulSoup(res.text, "html.parser").get_text()
-            ratio_match = re.search(r"當沖比率[^\d]*(\d+(?:\.\d+)?)%", text)
-            vol_match = re.search(r"當沖張數[^\d]*([\d,]+)", text)
+        start_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        url = "https://api.finmindtrade.com/api/v4/data"
+        params = {
+            "dataset": "TaiwanStockDayTrading",
+            "data_id": stock_id,
+            "start_date": start_date,
+        }
+        res = requests.get(url, params=params, headers=HEADERS, timeout=5)
+        data = res.json()
 
-            ratio = float(ratio_match.group(1)) if ratio_match else 0.0
-            vol = int(vol_match.group(1).replace(",", "")) if vol_match else 0
+        if data.get("msg") == "success" and data.get("data"):
+            df = pd.DataFrame(data["data"])
+            if not df.empty:
+                df = df.sort_values("date", ascending=False)
+                latest = df.iloc[0]
 
-            if ratio > 0 or vol > 0:
+                vol = int(latest.get("Volume", 0))
+                ratio = float(latest.get("DayTradingRate", 0)) * 100 if latest.get("DayTradingRate") else 0.0
+
                 result["summary"] = (
-                    f"最新當沖量: {vol:,}張 | 當沖比率: {ratio:.1f}%"
+                    f"[{latest['date']}] 最新當沖量: {vol:,}張 | 當沖比率: {ratio:.1f}%"
                 )
-                today_str = datetime.now().strftime("%Y-%m-%d")
-                result["day_trade_df"] = pd.DataFrame(
-                    [
-                        {
-                            "日期": today_str,
-                            "當沖張數(張)": f"{vol:,}",
-                            "當沖比率(%)": f"{ratio:.1f}%",
-                        }
-                    ]
-                )
+
+                df_display = df.head(10).copy()
+                df_display["DayTradingRate"] = (df_display["DayTradingRate"] * 100).round(1).astype(str) + "%"
+                df_display = df_display[["date", "Volume", "DayTradingRate"]]
+                df_display.columns = ["日期", "當沖張數(張)", "當沖比率(%)"]
+                result["day_trade_df"] = df_display
     except Exception as e:
-        print(f"當沖資料抓取失敗: {e}")
+        print(f"FinMind 當沖資料抓取失敗: {e}")
     return result
 
 
@@ -843,7 +840,7 @@ def get_tech_data(stock_id: str, stock_name: str) -> dict:
 
 
 def get_chip_data(stock_id: str, days: int = 20) -> pd.DataFrame:
-    """全面強化法人數據補強：透過 FinMind API 抓取並清理三大法人買賣超資料"""
+    """透過 FinMind API 抓取三大法人買賣超資料"""
     try:
         start_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
         url = "https://api.finmindtrade.com/api/v4/data"
@@ -861,7 +858,6 @@ def get_chip_data(stock_id: str, days: int = 20) -> pd.DataFrame:
                 (raw_df["buy"] - raw_df["sell"]) / 1000
             ).round(0)
 
-            # 簡化三大法人名稱映射
             name_map = {
                 "Foreign_Investor": "外資",
                 "Foreign_Dealer_Self": "外資自營商",
@@ -875,7 +871,6 @@ def get_chip_data(stock_id: str, days: int = 20) -> pd.DataFrame:
                 index="date", columns="name", values="net_buy_vol", aggfunc="sum"
             ).fillna(0)
 
-            # 確保必要欄位存在
             for col in ["外資", "投信", "自營商(自營)", "自營商(避險)"]:
                 if col not in pivot_df.columns:
                     pivot_df[col] = 0
@@ -887,11 +882,9 @@ def get_chip_data(stock_id: str, days: int = 20) -> pd.DataFrame:
                 + pivot_df["自營商(避險)"]
             )
 
-            # 轉為繁體格式並依照日期倒序排列
             pivot_df = pivot_df.sort_index(ascending=False)
             pivot_df.index.name = "日期"
 
-            # 格式化輸出
             display_cols = [
                 "外資",
                 "投信",
@@ -1087,7 +1080,6 @@ def analyze_trend(
 st.title("📈 股市大亨 - 完整台股診斷系統 (Web版)")
 st.caption("同步證交所/櫃買中心官方產業類別，提供技術面、法人與信用籌碼綜合診斷")
 
-# 1. 將預設輸入框設為空白 (避免開啟就直接查詢 2330)
 with st.container():
     col_input, col_btn = st.columns([4, 1])
     with col_input:
@@ -1104,7 +1096,6 @@ with st.container():
             "完整分析", type="primary", use_container_width=True
         )
 
-# 2. 只有當使用者按下按鈕或輸入框有值時才進行解析與執行
 if search_clicked or user_input.strip():
     with st.spinner("正在進行極速並行數據分析中..."):
         stock_id, stock_name = resolve_stock_info(user_input)
@@ -1112,8 +1103,8 @@ if search_clicked or user_input.strip():
         with ThreadPoolExecutor(max_workers=7) as executor:
             future_tech = executor.submit(get_tech_data, stock_id, stock_name)
             future_chip = executor.submit(get_chip_data, stock_id, 20)
-            future_margin = executor.submit(get_margin_trading_data, stock_id)
-            future_day_trade = executor.submit(get_day_trading_data, stock_id)
+            future_margin = executor.submit(get_margin_trading_data, stock_id, 20)
+            future_day_trade = executor.submit(get_day_trading_data, stock_id, 20)
             future_large_holders = executor.submit(
                 get_large_shareholders_data, stock_id
             )
@@ -1206,10 +1197,10 @@ if search_clicked or user_input.strip():
                     f"**🐋 集保大戶動態：** {large_holders_data.get('summary', '無數據')}"
                 )
                 st.markdown(
-                    f"**💳 融資融券(即時)：** {margin_data.get('summary', '無數據')}"
+                    f"**💳 融資融券(最新)：** {margin_data.get('summary', '無數據')}"
                 )
                 st.markdown(
-                    f"**⚡ 當沖動態：** {day_trade_data.get('summary', '無數據')}"
+                    f"**⚡ 當沖動態(最新)：** {day_trade_data.get('summary', '無數據')}"
                 )
 
             st.markdown("---")
@@ -1243,7 +1234,7 @@ if search_clicked or user_input.strip():
                     st.write("尚無三大法人詳細籌碼數據。")
 
             with tab3:
-                st.subheader("信用交易與當沖明細")
+                st.subheader("信用交易與當沖明細 (近 10 日歷史紀錄)")
                 col_m, col_d = st.columns(2)
                 with col_m:
                     st.markdown("##### 融資融券變動表")
