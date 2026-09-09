@@ -204,7 +204,7 @@ def get_realtime_quote(stock_id: str) -> dict:
             from bs4 import BeautifulSoup
 
             soup = BeautifulSoup(res.text, "html.parser")
-            price, open_price = 0.0, 0.0
+            price, prev_close = 0.0, 0.0
 
             price_el = soup.find(
                 "span",
@@ -225,10 +225,11 @@ def get_realtime_quote(stock_id: str) -> dict:
                 except ValueError:
                     price = 0.0
 
-            open_labels = soup.find_all(
-                "span", text=re.compile(r"^開盤|^開盤價")
+            # 抓取前日收盤價計算每日漲跌幅
+            close_labels = soup.find_all(
+                "span", string=re.compile(r"^前收|^昨日收盤|^前日收盤")
             )
-            for l in open_labels:
+            for l in close_labels:
                 parent = l.parent
                 if parent:
                     val_el = parent.find_next_sibling() or parent.find(
@@ -236,20 +237,18 @@ def get_realtime_quote(stock_id: str) -> dict:
                     )
                     if val_el:
                         try:
-                            open_price = float(
+                            prev_close = float(
                                 val_el.text.replace(",", "").strip()
                             )
-                            if open_price > 0:
+                            if prev_close > 0:
                                 break
                         except ValueError:
                             pass
 
             if price > 0:
-                if open_price > 0:
-                    change = price - open_price
-                    pct_change = (change / open_price) * 100
-                else:
-                    change, pct_change = 0.0, 0.0
+                base_price = prev_close if prev_close > 0 else price
+                change = price - base_price
+                pct_change = (change / base_price) * 100 if base_price > 0 else 0.0
 
                 if change > 0:
                     arrow, color = "🔺", "#d9534f"
@@ -270,7 +269,7 @@ def get_realtime_quote(stock_id: str) -> dict:
                 )
                 return quote
     except Exception as e:
-        print(f"Yahoo 網頁爬取失敗: {e}")
+        print(f"Yahoo 網頁爬取失敗 ({stock_id}): {e}")
 
     return quote
 
@@ -296,9 +295,11 @@ def get_group_status(stock_id: str) -> dict:
 
     up_count, down_count, total_pct, valid_count = 0, 0, 0.0, 0
 
-    for m_code in members:
-        m_code_clean = str(m_code).strip()
-        rt = get_realtime_quote(m_code_clean)
+    # 使用多線程並行抓取族群成分股行情
+    with ThreadPoolExecutor(max_workers=min(len(members), 10)) as executor:
+        results = list(executor.map(get_realtime_quote, [str(m).strip() for m in members]))
+
+    for rt in results:
         if rt and rt.get("current_price", 0) > 0:
             pct = rt.get("pct_change", 0.0)
             total_pct += pct
@@ -458,7 +459,6 @@ def calculate_gap_levels(df: pd.DataFrame, max_lookback: int = 60) -> dict:
     return res
 
 
-# 改名與擴充：集保大戶資料擷取（包含最近 5 週歷史數據）
 def get_large_shareholders_data(stock_id: str) -> dict:
     start_date = (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d")
     url = "https://api.finmindtrade.com/api/v4/data"
@@ -480,11 +480,9 @@ def get_large_shareholders_data(stock_id: str) -> dict:
             df = pd.DataFrame(data["data"])
             unique_dates = sorted(df["date"].unique())
 
-            # 過濾集保大戶 (1,000張以上，層級 15)
             large_df = df[df["holding_shares_level"] == 15].sort_values("date")
 
             if not large_df.empty:
-                # 建立歷史趨勢資料表
                 history_df = large_df.tail(5)[
                     ["date", "percent", "people"]
                 ].copy()
@@ -609,7 +607,6 @@ def get_financial_and_analyst_data(ticker: yf.Ticker) -> dict:
     return fin_data
 
 
-# 增強：融資融券數據與明細表
 def get_margin_trading_data(stock_id: str, days: int = 10) -> dict:
     start_date = (datetime.now() - timedelta(days=days * 3)).strftime("%Y-%m-%d")
     url = "https://api.finmindtrade.com/api/v4/data"
@@ -648,7 +645,6 @@ def get_margin_trading_data(stock_id: str, days: int = 10) -> dict:
                     f"融券: {s_balance:,}張 ({short_diff:+,}張)"
                 )
 
-                # 建立明細表
                 display_df = latest_df[
                     [
                         "date",
@@ -678,7 +674,6 @@ def get_margin_trading_data(stock_id: str, days: int = 10) -> dict:
     return result
 
 
-# 增強：當沖資料與明細表
 def get_day_trading_data(stock_id: str, days: int = 10) -> dict:
     start_date = (datetime.now() - timedelta(days=days * 3)).strftime("%Y-%m-%d")
     url = "https://api.finmindtrade.com/api/v4/data"
@@ -708,7 +703,6 @@ def get_day_trading_data(stock_id: str, days: int = 10) -> dict:
                     f"最新當沖量: {vol:,}張 | 當沖比率: {ratio:.1f}%"
                 )
 
-                # 明細表格整理
                 latest_df["當沖張數"] = (
                     latest_df["Volume"] // 1000
                 ).astype(int)
@@ -851,7 +845,6 @@ def get_tech_data(stock_id: str, stock_name: str) -> dict:
         return {"error": "資料處理異常"}
 
 
-# 強化：完整三大法人近 10 日買賣超資訊
 def get_chip_data(stock_id: str, days: int = 10) -> pd.DataFrame:
     start_date = (datetime.now() - timedelta(days=days * 3)).strftime("%Y-%m-%d")
     url = "https://api.finmindtrade.com/api/v4/data"
@@ -865,15 +858,15 @@ def get_chip_data(stock_id: str, days: int = 10) -> pd.DataFrame:
         data = response.json()
         if data.get("msg") == "success" and data.get("data"):
             df = pd.DataFrame(data["data"])
-            df["buy_sell_shares"] = (df["buy"] - df["sell"]) // 1000
+            # 改用浮點數相除後四捨五入，避免負號整除計算誤差
+            df["buy_sell_shares"] = (df["buy"] - df["sell"]) / 1000.0
             pivot_df = df.pivot_table(
                 index="date",
                 columns="name",
                 values="buy_sell_shares",
                 aggfunc="sum",
-            ).fillna(0)
+            ).fillna(0).round().astype(int)
 
-            # 重新命名與欄位整合
             col_map = {
                 "Foreign_Investor": "外資",
                 "Investment_Trust": "投信",
@@ -882,7 +875,6 @@ def get_chip_data(stock_id: str, days: int = 10) -> pd.DataFrame:
             }
             pivot_df.rename(columns=col_map, inplace=True)
 
-            # 補齊自營商合計與三大法人合計
             dealer_cols = [c for c in ["自營商(自營)", "自營商(避險)"] if c in pivot_df.columns]
             if dealer_cols:
                 pivot_df["自營商"] = pivot_df[dealer_cols].sum(axis=1)
@@ -916,7 +908,6 @@ def get_stock_news(stock_id: str, max_news: int = 5) -> list:
     return news_titles
 
 
-# 新增：繪製 K 線與均線走勢圖
 def plot_candlestick_chart(df: pd.DataFrame, stock_id: str, stock_name: str):
     fig = make_subplots(
         rows=2,
@@ -927,7 +918,6 @@ def plot_candlestick_chart(df: pd.DataFrame, stock_id: str, stock_name: str):
         subplot_titles=(f"{stock_id} {stock_name} K線與均線走勢", "成交量"),
     )
 
-    # K線
     fig.add_trace(
         go.Candlestick(
             x=df.index,
@@ -943,7 +933,6 @@ def plot_candlestick_chart(df: pd.DataFrame, stock_id: str, stock_name: str):
         col=1,
     )
 
-    # 均線
     if "MA10" in df:
         fig.add_trace(
             go.Scatter(
@@ -981,7 +970,6 @@ def plot_candlestick_chart(df: pd.DataFrame, stock_id: str, stock_name: str):
             col=1,
         )
 
-    # 成交量
     colors = [
         "#d9534f" if c >= o else "#5cb85c"
         for c, o in zip(df["Close"], df["Open"])
@@ -1025,7 +1013,6 @@ def analyze_trend(
     else:
         signals.append(f"• {tech_data['error']}")
 
-    # 加入集保動態訊號
     if large_holders_data.get("score_change"):
         score += large_holders_data["score_change"]
     signals.extend(large_holders_data.get("signals", []))
@@ -1053,17 +1040,26 @@ def analyze_trend(
             signals.append(
                 f"• [籌碼主軸] 外資近 5 日累計買超 {int(foreign_total):,} 張 (+2分)"
             )
-        else:
+        elif foreign_total < 0:
             score -= 2
             signals.append(
                 f"• [籌碼主軸] 外資近 5 日累計賣超 {int(abs(foreign_total)):,} 張 (-2分)"
             )
+        else:
+            signals.append("• [籌碼主軸] 外資近 5 日無顯著買賣超 (0 分)")
 
         if trust_total > 0:
             score += 2
             signals.append(
                 f"• [籌碼主軸] 投信近 5 日累計買超 {int(trust_total):,} 張 (+2分)"
             )
+        elif trust_total < 0:
+            score -= 2
+            signals.append(
+                f"• [籌碼主軸] 投信近 5 日累計賣超 {int(abs(trust_total)):,} 張 (-2分)"
+            )
+        else:
+            signals.append("• [籌碼主軸] 投信近 5 日無顯著買賣超 (0 分)")
 
     if trend_status == "BEAR":
         trend = "📉 弱勢空頭 (受制於均線反壓)"
@@ -1093,7 +1089,6 @@ def analyze_trend(
 st.title("📈 股市大亨 - 完整台股診斷系統 (Web版)")
 st.caption("同步證交所/櫃買中心官方產業類別，提供技術面、集保籌碼與財務綜合診斷")
 
-# 1. 搜尋區域
 with st.container():
     col_input, col_btn = st.columns([4, 1])
     with col_input:
@@ -1113,7 +1108,6 @@ if search_clicked or user_input:
     with st.spinner("正在進行極速並行數據分析中..."):
         stock_id, stock_name = resolve_stock_info(user_input)
 
-        # 並行調用
         with ThreadPoolExecutor(max_workers=7) as executor:
             future_tech = executor.submit(get_tech_data, stock_id, stock_name)
             future_chip = executor.submit(get_chip_data, stock_id, 10)
@@ -1146,14 +1140,12 @@ if search_clicked or user_input:
                 tech_data,
             )
 
-            # --- 綜合診斷卡片 ---
             st.subheader(f"🔍 診斷標的：{stock_id} {stock_name}")
 
             now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             data_date = tech_data.get("latest_date", "未知")
             st.caption(f"當前系統時間: {now_str} | K線資料日: {data_date}")
 
-            # 核心指標 Metrics
             rt = tech_data.get("realtime_quote", {})
             m1, m2, m3, m4 = st.columns(4)
             m1.metric(
@@ -1167,7 +1159,6 @@ if search_clicked or user_input:
 
             st.markdown("---")
 
-            # 所有細節欄位卡片展示
             c1, c2 = st.columns(2)
 
             with c1:
@@ -1222,14 +1213,12 @@ if search_clicked or user_input:
 
             st.markdown("---")
 
-            # 新增：個股走勢圖展示
             st.subheader("📈 個股技術走勢圖")
             fig = plot_candlestick_chart(tech_data["df"], stock_id, stock_name)
             st.plotly_chart(fig, use_container_width=True)
 
             st.markdown("---")
 
-            # --- 分頁：權重分析訊號 / 三大法人10日買賣超 / 融資融券與當沖 / 集保大戶動態 / 最新新聞 ---
             tab1, tab2, tab3, tab4, tab5 = st.tabs(
                 [
                     "📋 權重分析訊號",
@@ -1281,12 +1270,12 @@ if search_clicked or user_input:
                         use_container_width=True,
                     )
                 else:
-                    st.write("無集保大戶歷史資料。")
+                    st.write("目前尚無集保大戶歷史資料。")
 
             with tab5:
-                st.subheader("即時相關新聞")
+                st.subheader("最新市場相關新聞")
                 if news_list:
-                    for i, news in enumerate(news_list, 1):
-                        st.write(f"**{i}.** {news}")
+                    for news in news_list:
+                        st.write(f"📰 {news}")
                 else:
-                    st.write("未找到相關新聞。")
+                    st.write("暫無即時新聞資料。")
