@@ -2,6 +2,7 @@ import os
 import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -465,136 +466,99 @@ def calculate_gap_levels(df: pd.DataFrame, max_lookback: int = 60) -> dict:
     return res
 
 
-# ==========================================
-# 方案二：TDCC 臺灣集中保管結算所 Open Data 模組
-# ==========================================
-@st.cache_data(ttl=3600)
-def fetch_tdcc_official_csv():
-    """爬取 TDCC 台灣集保結算所每週最新的全市場集保戶數分級檔 (快取1小時)"""
-    url = "https://smart.tdcc.com.tw/opendata/getopendata.ashx?id=1-5"
-    try:
-        df = pd.read_csv(url, encoding="utf-8")
-        return df
-    except Exception:
-        try:
-            df = pd.read_csv(url, encoding="big5")
-            return df
-        except Exception as e:
-            print(f"TDCC 官方 CSV 下載失敗: {e}")
-            return pd.DataFrame()
-
-
 def get_large_shareholders_data(stock_id: str) -> dict:
-    """直接解析 TDCC 官方集保 Open Data，比對最新與上一週的大戶與散戶持股增減"""
+    start_date = (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d")
+    url = "https://api.finmindtrade.com/api/v4/data"
+    params = {
+        "dataset": "TaiwanStockDepositShare",
+        "data_id": stock_id,
+        "start_date": start_date,
+    }
     result = {
         "summary": "無集保數據",
         "score_change": 0,
         "signals": [],
         "history_df": pd.DataFrame(),
     }
-    
-    raw_df = fetch_tdcc_official_csv()
-    if raw_df.empty:
-        return result
-
     try:
-        # 清理與統一欄位名稱 (常見: 資料日期, 證券代號, 持股分級, 人數, 股數, 占集保庫存數比例%)
-        raw_df.columns = [c.strip() for c in raw_df.columns]
-        
-        # 篩選個股
-        stock_df = raw_df[raw_df["證券代號"].astype(str).str.strip() == str(stock_id).strip()].copy()
-        
-        if stock_df.empty:
-            return result
+        res = requests.get(url, params=params, headers=HEADERS, timeout=5)
+        data = res.json()
+        if data.get("msg") == "success" and data.get("data"):
+            df = pd.DataFrame(data["data"])
+            unique_dates = sorted(df["date"].unique())
 
-        # 轉數字格式
-        stock_df["持股分級"] = pd.to_numeric(stock_df["持股分級"], errors="coerce")
-        stock_df["人數"] = pd.to_numeric(stock_df["人數"], errors="coerce")
-        stock_df["占集保庫存數比例%"] = pd.to_numeric(stock_df["占集保庫存數比例%"], errors="coerce")
-        stock_df["資料日期"] = stock_df["資料日期"].astype(str).str.strip()
+            if len(unique_dates) >= 1:
+                history_records = []
+                for d in unique_dates:
+                    df_d = df[df["date"] == d]
+                    
+                    large_row = df_d[df_d["holding_shares_level"] == 15]
+                    large_ratio = float(large_row["percent"].values[0]) if not large_row.empty else 0.0
+                    large_people = int(large_row["people"].values[0]) if not large_row.empty else 0
+                    
+                    retail_rows = df_d[df_d["holding_shares_level"] <= 9]
+                    retail_ratio = float(retail_rows["percent"].sum()) if not retail_rows.empty else 0.0
+                    retail_people = int(retail_rows["people"].sum()) if not retail_rows.empty else 0
+                    
+                    history_records.append({
+                        "集保日期": d,
+                        "大戶持股比(%)": round(large_ratio, 2),
+                        "大戶人數(人)": large_people,
+                        "散戶持股比(%)": round(retail_ratio, 2),
+                        "散戶人數(人)": retail_people,
+                    })
 
-        # 獲取出現的日期（按新到舊排序）
-        unique_dates = sorted(stock_df["資料日期"].unique(), reverse=True)
+                history_df = pd.DataFrame(history_records).sort_values("集保日期", ascending=False)
+                result["history_df"] = history_df.head(8)
 
-        history_records = []
-        for d in unique_dates:
-            df_d = stock_df[stock_df["資料日期"] == d]
-            
-            # 大戶: 持股分級 == 15 (>1000張 / 1,000,001股以上)
-            large_row = df_d[df_d["持股分級"] == 15]
-            large_ratio = float(large_row["占集保庫存數比例%"].values[0]) if not large_row.empty else 0.0
-            large_people = int(large_row["人數"].values[0]) if not large_row.empty else 0
+                if len(unique_dates) >= 2:
+                    latest_d = unique_dates[-1]
+                    prev_d = unique_dates[-2]
 
-            # 散戶: 持股分級 <= 9 (1~50張 / 1~50,000股)
-            retail_rows = df_d[df_d["持股分級"] <= 9]
-            retail_ratio = float(retail_rows["占集保庫存數比例%"].sum()) if not retail_rows.empty else 0.0
-            retail_people = int(retail_rows["人數"].sum()) if not retail_rows.empty else 0
+                    latest_rec = history_df[history_df["集保日期"] == latest_d].iloc[0]
+                    prev_rec = history_df[history_df["集保日期"] == prev_d].iloc[0]
 
-            history_records.append({
-                "集保日期": d,
-                "大戶持股比(%)": round(large_ratio, 2),
-                "大戶人數(人)": large_people,
-                "散戶持股比(%)": round(retail_ratio, 2),
-                "散戶人數(人)": retail_people,
-            })
+                    l_ratio_diff = latest_rec["大戶持股比(%)"] - prev_rec["大戶持股比(%)"]
+                    l_people_diff = latest_rec["大戶人數(人)"] - prev_rec["大戶人數(人)"]
 
-        history_df = pd.DataFrame(history_records)
-        result["history_df"] = history_df
+                    r_ratio_diff = latest_rec["散戶持股比(%)"] - prev_rec["散戶持股比(%)"]
+                    r_people_diff = latest_rec["散戶人數(人)"] - prev_rec["散戶人數(人)"]
 
-        if len(history_records) >= 1:
-            latest = history_records[0]
-            
-            # 若包含至少 2 週資料，進行前後增減比較
-            if len(history_records) >= 2:
-                prev = history_records[1]
-                l_ratio_diff = latest["大戶持股比(%)"] - prev["大戶持股比(%)"]
-                l_people_diff = latest["大戶人數(人)"] - prev["大戶人數(人)"]
-                r_ratio_diff = latest["散戶持股比(%)"] - prev["散戶持股比(%)"]
+                    l_arrow = "⬆️" if l_ratio_diff > 0 else ("⬇️" if l_ratio_diff < 0 else "➡️")
+                    r_arrow = "⬆️" if r_ratio_diff > 0 else ("⬇️" if r_ratio_diff < 0 else "➡️")
 
-                l_arrow = "⬆️" if l_ratio_diff > 0 else ("⬇️" if l_ratio_diff < 0 else "➡️")
-                r_arrow = "⬆️" if r_ratio_diff > 0 else ("⬇️" if r_ratio_diff < 0 else "➡️")
-
-                result["summary"] = (
-                    f"[{latest['集保日期']}] 🏰 大戶(>1k張): {latest['大戶持股比(%)']:.2f}% ({l_arrow} {l_ratio_diff:+.2f}%) | "
-                    f"🐟 散戶(<50張): {latest['散戶持股比(%)']:.2f}% ({r_arrow} {r_ratio_diff:+.2f}%)"
-                )
-
-                # 集保籌碼診斷評分
-                if l_ratio_diff >= 0.3 and r_ratio_diff <= -0.2:
-                    result["score_change"] = 3
-                    result["signals"].append(
-                        f"• [集保籌碼強勢] 上週({latest['集保日期']}) 籌碼大幅集中！大戶持股 +{l_ratio_diff:.2f}%，散戶退場 {r_ratio_diff:+.2f}% (+3分)"
+                    result["summary"] = (
+                        f"[{latest_d}] 🏰 大戶(>1k張): {latest_rec['大戶持股比(%)']:.2f}% ({l_arrow} {l_ratio_diff:+.2f}%) | "
+                        f"🐟 散戶(<50張): {latest_rec['散戶持股比(%)']:.2f}% ({r_arrow} {r_ratio_diff:+.2f}%)"
                     )
-                elif l_ratio_diff >= 0.3:
-                    result["score_change"] = 2
-                    result["signals"].append(
-                        f"• [集保籌碼] 上週({latest['集保日期']}) 大戶持股增加 {l_ratio_diff:+.2f}% (大戶人數 {l_people_diff:+}人) (+2分)"
-                    )
-                elif l_ratio_diff <= -0.3 and r_ratio_diff >= 0.2:
-                    result["score_change"] = -3
-                    result["signals"].append(
-                        f"• [集保籌碼分散] 上週({latest['集保日期']}) 籌碼流向散戶！大戶減持 {l_ratio_diff:+.2f}%，散戶接盤 +{r_ratio_diff:.2f}% (-3分)"
-                    )
-                elif l_ratio_diff <= -0.3:
-                    result["score_change"] = -2
-                    result["signals"].append(
-                        f"• [集保籌碼] 上週({latest['集保日期']}) 大戶持股減少 {l_ratio_diff:+.2f}% (大戶人數 {l_people_diff:+}人) (-2分)"
-                    )
-            else:
-                # 只有一週資料時顯示基礎分布
-                result["summary"] = (
-                    f"[{latest['集保日期']}] 🏰 大戶(>1k張): {latest['大戶持股比(%)']:.2f}% ({latest['大戶人數(人)']:,}人) | "
-                    f"🐟 散戶(<50張): {latest['散戶持股比(%)']:.2f}% ({latest['散戶人數(人)']:,}人)"
-                )
-                result["signals"].append(f"• [最新集保分佈] {result['summary']}")
 
+                    if l_ratio_diff >= 0.3 and r_ratio_diff <= -0.2:
+                        result["score_change"] = 3
+                        result["signals"].append(
+                            f"• [集保籌碼強勢] 上週({latest_d}) 籌碼大幅集中！大戶持股 +{l_ratio_diff:.2f}%，散戶退場 {r_ratio_diff:+.2f}% (+3分)"
+                        )
+                    elif l_ratio_diff >= 0.3:
+                        result["score_change"] = 2
+                        result["signals"].append(
+                            f"• [集保籌碼] 上週({latest_d}) 大戶持股增加 {l_ratio_diff:+.2f}% (大戶人數 {l_people_diff:+}人) (+2分)"
+                        )
+                    elif l_ratio_diff <= -0.3 and r_ratio_diff >= 0.2:
+                        result["score_change"] = -3
+                        result["signals"].append(
+                            f"• [集保籌碼分散] 上週({latest_d}) 籌碼流向散戶！大戶減持 {l_ratio_diff:+.2f}%，散戶接盤 +{r_ratio_diff:.2f}% (-3分)"
+                        )
+                    elif l_ratio_diff <= -0.3:
+                        result["score_change"] = -2
+                        result["signals"].append(
+                            f"• [集保籌碼] 上週({latest_d}) 大戶持股減少 {l_ratio_diff:+.2f}% (大戶人數 {l_people_diff:+}人) (-2分)"
+                        )
     except Exception as e:
-        print(f"解析 TDCC 集保資料失敗: {e}")
-
+        print(f"集保大戶散戶資料抓取失敗: {e}")
     return result
 
 
-def get_financial_and_analyst_data(ticker: yf.Ticker) -> dict:
+def get_financial_and_analyst_data(ticker: yf.Ticker, stock_id: str = "") -> dict:
+    """修正版財務數據解析：嚴格精算營收 YoY 與獲利預估，防止數據異常誤導"""
     info = ticker.info or {}
     fin_data = {
         "analyst_target": "無數據",
@@ -610,6 +574,7 @@ def get_financial_and_analyst_data(ticker: yf.Ticker) -> dict:
     }
 
     try:
+        # 1. 法人目標價
         target_mean = info.get("targetMeanPrice")
         target_high = info.get("targetHighPrice")
         target_low = info.get("targetLowPrice")
@@ -618,38 +583,74 @@ def get_financial_and_analyst_data(ticker: yf.Ticker) -> dict:
                 f"${target_mean:.2f} (範圍: ${target_low:.2f} ~ ${target_high:.2f})"
             )
 
+        # 2. 本益比與股淨比
         pe = info.get("trailingPE")
         pb = info.get("priceToBook")
-        if pe:
+        if pe and not np.isnan(pe) and pe > 0:
             fin_data["pe_ratio"] = f"{pe:.2f} 倍"
-        if pb:
+        if pb and not np.isnan(pb) and pb > 0:
             fin_data["pb_ratio"] = f"{pb:.2f} 倍"
 
-        est_eps = info.get("forwardEps")
-        if est_eps:
-            fin_data["est_eps"] = f"${est_eps:.2f}"
-
-        rev_growth = info.get("revenueGrowth")
-        if rev_growth is not None:
-            rev_yoy_pct = rev_growth * 100
-            fin_data["revenue_yoy"] = f"{rev_yoy_pct:+.2f}%"
-            if rev_yoy_pct > 15:
-                fin_data["fundamental_score"] += 3
-                fin_data["fundamental_signals"].append(
-                    f"• [基本面強勁] 營收 YoY 正成長 ({rev_yoy_pct:+.2f}%) (+3分)"
-                )
-            elif rev_yoy_pct < -15:
-                fin_data["fundamental_score"] -= 3
-                fin_data["fundamental_signals"].append(
-                    f"• [基本面衰退] 營收 YoY 負成長 ({rev_yoy_pct:+.2f}%) (-3分)"
-                )
-
+        # 3. 近四季累積 EPS (Trailing EPS)
         eps = info.get("trailingEps")
-        if eps is not None:
+        if eps is not None and not np.isnan(eps):
             fin_data["eps"] = f"${eps:.2f}"
 
+        # 4. 精確營收年增率 (YoY) 算號邏輯 (優先採用 quarterly_financials 進行真 YoY 演算)
+        calculated_yoy = None
+        try:
+            q_fin = ticker.quarterly_financials
+            if q_fin is not None and not q_fin.empty:
+                rev_row = None
+                for idx_name in ["Total Revenue", "Operating Revenue", "Revenue"]:
+                    if idx_name in q_fin.index:
+                        rev_row = q_fin.loc[idx_name]
+                        break
+                if rev_row is not None and len(rev_row) >= 4:
+                    latest_q_rev = rev_row.iloc[0]
+                    yoy_q_rev = rev_row.iloc[4] if len(rev_row) >= 5 else rev_row.iloc[3]
+                    if yoy_q_rev and yoy_q_rev > 0:
+                        calculated_yoy = ((latest_q_rev - yoy_q_rev) / yoy_q_rev) * 100
+        except Exception as q_e:
+            print(f"季報營收 YoY 精算跳過: {q_e}")
+
+        # 備援：若季報拿不到，使用 info.get("revenueGrowth") 並進行嚴格區間極值防護
+        if calculated_yoy is None:
+            rev_growth = info.get("revenueGrowth")
+            if rev_growth is not None and not np.isnan(rev_growth):
+                raw_yoy = rev_growth * 100
+                # 若 YoY 數字異常巨大 (>500% 或 <-90%)，通常為 API 數據錯位，自動平滑防錯
+                if -90.0 <= raw_yoy <= 500.0:
+                    calculated_yoy = raw_yoy
+
+        if calculated_yoy is not None:
+            fin_data["revenue_yoy"] = f"{calculated_yoy:+.2f}%"
+            if calculated_yoy > 15:
+                fin_data["fundamental_score"] += 3
+                fin_data["fundamental_signals"].append(
+                    f"• [基本面強勁] 營收 YoY 正成長 ({calculated_yoy:+.2f}%) (+3分)"
+                )
+            elif calculated_yoy < -15:
+                fin_data["fundamental_score"] -= 3
+                fin_data["fundamental_signals"].append(
+                    f"• [基本面衰退] 營收 YoY 負成長 ({calculated_yoy:+.2f}%) (-3分)"
+                )
+
+        # 5. 預估 EPS (Forward EPS) 安全演算
+        est_eps = info.get("forwardEps")
+        if est_eps is not None and not np.isnan(est_eps) and est_eps > 0:
+            fin_data["est_eps"] = f"${est_eps:.2f}"
+        elif eps is not None and not np.isnan(eps) and eps > 0:
+            # 備援：若無研報 forwardEps，以近四季 EPS + 營收 YoY 動能做保守獲利預估
+            growth_factor = (calculated_yoy / 100.0) if calculated_yoy is not None else 0.0
+            # 動能因子上限封頂 [-30%, +30%] 避免極端值
+            growth_factor = max(-0.3, min(0.3, growth_factor))
+            projected_eps = eps * (1 + growth_factor)
+            fin_data["est_eps"] = f"${projected_eps:.2f} (動能推估)"
+
+        # 6. 毛利率
         gross_m = info.get("grossMargins")
-        if gross_m is not None:
+        if gross_m is not None and not np.isnan(gross_m):
             fin_data["gross_margin"] = f"{gross_m * 100:.2f}%"
 
     except Exception as e:
@@ -766,7 +767,7 @@ def get_tech_data(stock_id: str, stock_name: str) -> dict:
             df.columns = df.columns.get_level_values(0)
 
         realtime_quote = get_realtime_quote(stock_id)
-        fin_data = get_financial_and_analyst_data(ticker)
+        fin_data = get_financial_and_analyst_data(ticker, stock_id=stock_id)
 
         df["MA10"] = df["Close"].rolling(window=10).mean()
         df["MA20"] = df["Close"].rolling(window=20).mean()
@@ -1295,7 +1296,7 @@ if search_clicked or user_input.strip():
                         st.write("無當沖明細。")
 
             with tab4:
-                st.subheader("最近集保大戶(>1k張)與散戶(<50張)持股變動明細")
+                st.subheader("最近 8 週大戶(>1k張)與散戶(<50張)持股變動趨勢")
                 if not large_holders_data["history_df"].empty:
                     st.dataframe(
                         large_holders_data["history_df"],
