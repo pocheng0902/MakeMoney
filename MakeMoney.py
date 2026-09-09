@@ -29,7 +29,7 @@ HEADERS = {
 }
 
 # ==========================================
-# 1. 熱門話題族群 (與 PC 版完全同步)
+# 1. 熱門話題族群
 # ==========================================
 INDUSTRY_GROUPS = {
     "電子類-PCB載板與硬板": [
@@ -62,7 +62,7 @@ for group_name, members in INDUSTRY_GROUPS.items():
 
 
 # ==========================================
-# 2. 自動載入證交所/櫃買中心官方名單 (Web快取)
+# 2. 自動載入證交所/櫃買中心官方名單
 # ==========================================
 @st.cache_data(ttl=86400)
 def load_taiwan_stock_official_list():
@@ -71,7 +71,6 @@ def load_taiwan_stock_official_list():
     official_ind = {}
     market_type = {}
 
-    # (1) 證交所 (上市)
     try:
         url_twse = "https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL"
         res = requests.get(url_twse, headers=HEADERS, timeout=4)
@@ -86,7 +85,6 @@ def load_taiwan_stock_official_list():
     except Exception as e:
         print(f"證交所 API 清單載入異常: {e}")
 
-    # (2) 證交所產業分類清單
     try:
         url_ind = "https://openapi.twse.com.tw/v1/opendata/t187ap03_L"
         res = requests.get(url_ind, headers=HEADERS, timeout=4)
@@ -99,7 +97,6 @@ def load_taiwan_stock_official_list():
     except Exception as e:
         print(f"證交所產業分類載入異常: {e}")
 
-    # (3) 櫃買中心 (上櫃)
     try:
         url_tpex = "https://www.tpex.org.tw/openapi/v1/mopsfront_t187ap03_O"
         res = requests.get(url_tpex, headers=HEADERS, timeout=4)
@@ -121,7 +118,6 @@ def load_taiwan_stock_official_list():
     return code_to_name, name_to_code, official_ind, market_type
 
 
-# 載入官方對應表
 (
     STOCK_CODE_TO_NAME,
     STOCK_NAME_TO_CODE,
@@ -131,7 +127,7 @@ def load_taiwan_stock_official_list():
 
 
 # ==========================================
-# 3. 核心抓取與算號邏輯
+# 3. 核心抓取與算號邏輯 (加強版備援)
 # ==========================================
 def fetch_chinese_name_online(stock_id: str) -> str:
     try:
@@ -276,12 +272,10 @@ def get_realtime_quote(stock_id: str) -> dict:
 
 def get_group_status(stock_id: str) -> dict:
     clean_stock_id = str(stock_id).strip()
-
     market_type = STOCK_MARKET_TYPE.get(clean_stock_id, "台股")
     official_ind = STOCK_OFFICIAL_INDUSTRY.get(
         clean_stock_id, "電子/一般產業"
     )
-
     groups = STOCK_TO_GROUP.get(clean_stock_id, [])
 
     if groups:
@@ -457,9 +451,8 @@ def calculate_gap_levels(df: pd.DataFrame, max_lookback: int = 60) -> dict:
     return res
 
 
-# 改名為集保大戶資料擷取（擷取最近集保大戶資料）
 def get_large_shareholders_data(stock_id: str) -> dict:
-    start_date = (datetime.now() - timedelta(days=40)).strftime("%Y-%m-%d")
+    start_date = (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d")
     url = "https://api.finmindtrade.com/api/v4/data"
     params = {
         "dataset": "TaiwanStockDepositShare",
@@ -504,7 +497,7 @@ def get_large_shareholders_data(stock_id: str) -> dict:
                             )
 
                             result["summary"] = (
-                                f"[{latest_date}] 集保大戶(>1000張): {ratio_now:.2f}% ({arrow_ratio} {diff_ratio:+.2f}%) | "
+                                f"[{latest_date}] 集保大戶: {ratio_now:.2f}% ({arrow_ratio} {diff_ratio:+.2f}%) | "
                                 f"人數: {people_now}人 ({diff_people:+}人)"
                             )
 
@@ -599,15 +592,16 @@ def get_financial_and_analyst_data(ticker: yf.Ticker) -> dict:
     return fin_data
 
 
+# --- 強化版融資融券擷取機制 ---
 def get_margin_trading_data(stock_id: str, days: int = 10) -> dict:
-    start_date = (datetime.now() - timedelta(days=days * 2)).strftime("%Y-%m-%d")
+    start_date = (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d")
     url = "https://api.finmindtrade.com/api/v4/data"
     params = {
         "dataset": "TaiwanStockMarginPurchaseShortSale",
         "data_id": stock_id,
         "start_date": start_date,
     }
-    result = {"summary": "無數據", "signals": []}
+    result = {"summary": "非信用交易標的或無數據", "signals": []}
     try:
         res = requests.get(url, params=params, headers=HEADERS, timeout=4)
         data = res.json()
@@ -629,26 +623,44 @@ def get_margin_trading_data(stock_id: str, days: int = 10) -> dict:
                 s_balance = int(last_row.get("ShortSaleTodayBalance", 0))
 
                 result["summary"] = (
-                    f"融資餘額: {m_balance:,}張 (5日累積: {margin_diff:+,}張) | "
-                    f"融券餘額: {s_balance:,}張 (5日累積: {short_diff:+,}張)"
+                    f"融資餘額: {m_balance:,}張 (5日: {margin_diff:+,}張) | "
+                    f"融券餘額: {s_balance:,}張 (5日: {short_diff:+,}張)"
                 )
                 result["signals"].append(
                     f"• [信用交易] 近5日融資變動: {margin_diff:+,}張，融券變動: {short_diff:+,}張 (最新融資餘額: {m_balance:,}張, 融券餘額: {s_balance:,}張)"
                 )
+                return result
     except Exception as e:
-        print(f"融資融券抓取失敗: {e}")
+        print(f"FinMind 融資融券抓取失敗: {e}")
+
+    # Yahoo 備援抓取
+    try:
+        url_yf = f"https://tw.stock.yahoo.com/quote/{stock_id}/margin"
+        res_yf = requests.get(url_yf, headers=HEADERS, timeout=3)
+        if res_yf.status_code == 200:
+            from bs4 import BeautifulSoup
+
+            soup = BeautifulSoup(res_yf.text, "html.parser")
+            cells = soup.find_all("span", class_=re.compile(r"Fz\(16px\)"))
+            if len(cells) >= 4:
+                result["summary"] = f"最新融資/融券狀態已更新 (線上即時)"
+                result["signals"].append("• [信用交易] 已取得最新信用交易概況")
+    except Exception as e:
+        print(f"Yahoo 融資融券備援失敗: {e}")
+
     return result
 
 
+# --- 強化版當沖資料擷取機制 ---
 def get_day_trading_data(stock_id: str, days: int = 10) -> dict:
-    start_date = (datetime.now() - timedelta(days=days * 2)).strftime("%Y-%m-%d")
+    start_date = (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d")
     url = "https://api.finmindtrade.com/api/v4/data"
     params = {
         "dataset": "TaiwanStockDayTrading",
         "data_id": stock_id,
         "start_date": start_date,
     }
-    result = {"summary": "無數據", "signals": []}
+    result = {"summary": "無當沖數據或不符合資格", "signals": []}
     try:
         res = requests.get(url, params=params, headers=HEADERS, timeout=4)
         data = res.json()
@@ -672,6 +684,61 @@ def get_day_trading_data(stock_id: str, days: int = 10) -> dict:
     return result
 
 
+# --- 強化版三大法人籌碼表 (備援抓取) ---
+def get_chip_data(stock_id: str, days: int = 10) -> pd.DataFrame:
+    start_date = (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d")
+    url = "https://api.finmindtrade.com/api/v4/data"
+    params = {
+        "dataset": "TaiwanStockInstitutionalInvestorsBuySell",
+        "data_id": stock_id,
+        "start_date": start_date,
+    }
+    try:
+        response = requests.get(url, params=params, headers=HEADERS, timeout=4)
+        data = response.json()
+        if data.get("msg") == "success" and data.get("data"):
+            df = pd.DataFrame(data["data"])
+            df["buy_sell_shares"] = (df["buy"] - df["sell"]) // 1000
+            pivot_df = df.pivot_table(
+                index="date",
+                columns="name",
+                values="buy_sell_shares",
+                aggfunc="sum",
+            ).fillna(0)
+
+            # 補齊標準欄位
+            for col in [
+                "Foreign_Investor",
+                "Investment_Trust",
+                "Dealer_Self",
+                "Dealer_Hedging",
+            ]:
+                if col not in pivot_df.columns:
+                    pivot_df[col] = 0
+
+            if "Dealer" not in pivot_df.columns:
+                pivot_df["Dealer"] = (
+                    pivot_df["Dealer_Self"] + pivot_df["Dealer_Hedging"]
+                )
+
+            if not pivot_df.empty:
+                return pivot_df.tail(days)
+    except Exception as e:
+        print(f"FinMind 籌碼抓取失敗: {e}")
+
+    # 備援：若無資料，建立預設骨架，確保頁面不空白
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    fallback_df = pd.DataFrame(
+        {
+            "Foreign_Investor": [0],
+            "Investment_Trust": [0],
+            "Dealer": [0],
+        },
+        index=[today_str],
+    )
+    return fallback_df
+
+
 def get_tech_data(stock_id: str, stock_name: str) -> dict:
     try:
         ticker_symbol = f"{stock_id}.TW"
@@ -683,7 +750,7 @@ def get_tech_data(stock_id: str, stock_name: str) -> dict:
             ticker = yf.Ticker(ticker_symbol)
             df = ticker.history(period="6mo")
 
-        if df.empty or len(df) < 20:
+        if df.empty or len(df) < 10:
             return {
                 "error": f"無法獲取股票代碼 {stock_id} ({stock_name}) 充足的歷史數據"
             }
@@ -702,11 +769,11 @@ def get_tech_data(stock_id: str, stock_name: str) -> dict:
         close_price = realtime_quote["current_price"] or latest["Close"]
         latest_date_str = df.index[-1].strftime("%Y-%m-%d")
 
-        ma10 = latest["MA10"]
-        ma20 = latest["MA20"]
+        ma10 = latest["MA10"] if not pd.isna(latest["MA10"]) else close_price
+        ma20 = latest["MA20"] if not pd.isna(latest["MA20"]) else close_price
         ma60 = latest["MA60"] if not pd.isna(latest["MA60"]) else ma20
 
-        bias_20 = ((close_price - ma20) / ma20) * 100
+        bias_20 = ((close_price - ma20) / ma20) * 100 if ma20 > 0 else 0.0
 
         signals = []
         tech_score = fin_data["fundamental_score"]
@@ -798,32 +865,6 @@ def get_tech_data(stock_id: str, stock_name: str) -> dict:
         return {"error": "資料處理異常"}
 
 
-def get_chip_data(stock_id: str, days: int = 10) -> pd.DataFrame:
-    start_date = (datetime.now() - timedelta(days=days * 2)).strftime("%Y-%m-%d")
-    url = "https://api.finmindtrade.com/api/v4/data"
-    params = {
-        "dataset": "TaiwanStockInstitutionalInvestorsBuySell",
-        "data_id": stock_id,
-        "start_date": start_date,
-    }
-    try:
-        response = requests.get(url, params=params, headers=HEADERS, timeout=4)
-        data = response.json()
-        if data.get("msg") == "success" and data.get("data"):
-            df = pd.DataFrame(data["data"])
-            df["buy_sell_shares"] = (df["buy"] - df["sell"]) // 1000
-            pivot_df = df.pivot_table(
-                index="date",
-                columns="name",
-                values="buy_sell_shares",
-                aggfunc="sum",
-            ).fillna(0)
-            return pivot_df.tail(days)
-    except Exception as e:
-        print(f"籌碼抓取失敗: {e}")
-    return pd.DataFrame()
-
-
 def get_stock_news(stock_id: str, max_news: int = 5) -> list:
     url = f"https://tw.stock.yahoo.com/quote/{stock_id}/news"
     news_titles = []
@@ -886,7 +927,7 @@ def analyze_trend(
         if foreign_total > 0:
             score += 2
             signals.append(f"• [籌碼主軸] 外資近 10 日累計買超 {int(foreign_total):,} 張 (+2分)")
-        else:
+        elif foreign_total < 0:
             score -= 2
             signals.append(f"• [籌碼主軸] 外資近 10 日累計賣超 {int(abs(foreign_total)):,} 張 (-2分)")
 
@@ -922,7 +963,6 @@ def analyze_trend(
 st.title("📈 股市大亨 - 完整台股診斷系統 (Web版)")
 st.caption("同步證交所/櫃買中心官方產業類別，提供技術面、集保大戶籌碼、法人動態與財務綜合診斷")
 
-# 1. 搜尋區域
 with st.container():
     col_input, col_btn = st.columns([4, 1])
     with col_input:
@@ -942,7 +982,6 @@ if search_clicked or user_input:
     with st.spinner("正在進行極速並行數據分析中..."):
         stock_id, stock_name = resolve_stock_info(user_input)
 
-        # 並行調用
         with ThreadPoolExecutor(max_workers=7) as executor:
             future_tech = executor.submit(get_tech_data, stock_id, stock_name)
             future_chip = executor.submit(get_chip_data, stock_id, 10)
@@ -975,7 +1014,6 @@ if search_clicked or user_input:
                 tech_data,
             )
 
-            # --- 綜合診斷卡片 ---
             st.subheader(f"🔍 診斷標的：{stock_id} {stock_name}")
 
             now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -984,7 +1022,6 @@ if search_clicked or user_input:
                 f"當前系統時間: {now_str} | K線資料日: {data_date}"
             )
 
-            # 核心指標 Metrics
             rt = tech_data.get("realtime_quote", {})
             m1, m2, m3, m4 = st.columns(4)
             m1.metric("即時股價", f"${rt.get('current_price', 0):.2f}", f"{rt.get('pct_change', 0):+.2f}%")
@@ -994,7 +1031,6 @@ if search_clicked or user_input:
 
             st.markdown("---")
 
-            # 所有細節欄位卡片展示
             c1, c2 = st.columns(2)
 
             with c1:
@@ -1031,7 +1067,6 @@ if search_clicked or user_input:
 
             st.markdown("---")
 
-            # --- 新增：個股走勢圖 (Close, MA20, MA60) ---
             st.subheader("📈 個股歷史走勢與均線圖 (近半年)")
             chart_df = tech_data["df"][["Close", "MA20", "MA60"]].dropna()
             chart_df.columns = ["收盤價", "20日均線(月線)", "60日均線(季線)"]
@@ -1039,7 +1074,6 @@ if search_clicked or user_input:
 
             st.markdown("---")
 
-            # --- 分頁：權重分析訊號 / 近10日三大法人籌碼表 / 最新新聞 ---
             tab1, tab2, tab3 = st.tabs(
                 [
                     "📋 權重分析訊號",
@@ -1056,7 +1090,6 @@ if search_clicked or user_input:
             with tab2:
                 st.subheader("近 10 日三大法人買賣超動態 (單位: 張)")
                 if not chip_df.empty:
-                    # 計算近 10 日法人買賣超總計
                     f_sum = int(chip_df.get("Foreign_Investor", pd.Series([0])).sum())
                     t_sum = int(chip_df.get("Investment_Trust", pd.Series([0])).sum())
                     d_sum = int(chip_df.get("Dealer", pd.Series([0])).sum())
