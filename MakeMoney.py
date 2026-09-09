@@ -32,7 +32,7 @@ HEADERS = {
 }
 
 # ==========================================
-# 1. 熱門話題族群 (與 PC 版完全同步)
+# 1. 熱門話題族群
 # ==========================================
 INDUSTRY_GROUPS = {
     "電子類-PCB載板與硬板": [
@@ -74,7 +74,6 @@ def load_taiwan_stock_official_list():
     official_ind = {}
     market_type = {}
 
-    # (1) 證交所 (上市)
     try:
         url_twse = "https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL"
         res = requests.get(url_twse, headers=HEADERS, timeout=4)
@@ -89,7 +88,6 @@ def load_taiwan_stock_official_list():
     except Exception as e:
         print(f"證交所 API 清單載入異常: {e}")
 
-    # (2) 證交所產業分類清單
     try:
         url_ind = "https://openapi.twse.com.tw/v1/opendata/t187ap03_L"
         res = requests.get(url_ind, headers=HEADERS, timeout=4)
@@ -102,7 +100,6 @@ def load_taiwan_stock_official_list():
     except Exception as e:
         print(f"證交所產業分類載入異常: {e}")
 
-    # (3) 櫃買中心 (上櫃)
     try:
         url_tpex = "https://www.tpex.org.tw/openapi/v1/mopsfront_t187ap03_O"
         res = requests.get(url_tpex, headers=HEADERS, timeout=4)
@@ -244,7 +241,9 @@ def get_realtime_quote(stock_id: str) -> dict:
             if price > 0:
                 base_price = prev_close if prev_close > 0 else price
                 change = price - base_price
-                pct_change = (change / base_price) * 100 if base_price > 0 else 0.0
+                pct_change = (
+                    (change / base_price) * 100 if base_price > 0 else 0.0
+                )
 
                 if change > 0:
                     arrow, color = "🔺", "#d9534f"
@@ -292,7 +291,9 @@ def get_group_status(stock_id: str) -> dict:
     up_count, down_count, total_pct, valid_count = 0, 0, 0.0, 0
 
     with ThreadPoolExecutor(max_workers=min(len(members), 10)) as executor:
-        results = list(executor.map(get_realtime_quote, [str(m).strip() for m in members]))
+        results = list(
+            executor.map(get_realtime_quote, [str(m).strip() for m in members])
+        )
 
     for rt in results:
         if rt and rt.get("current_price", 0) > 0:
@@ -325,19 +326,29 @@ def get_group_status(stock_id: str) -> dict:
             color = "#337ab7"
     else:
         if up_count == valid_count or (avg_pct >= 2.0 and down_count == 0):
-            status_text = f"🔥 熱度極高 (族群強勢全面走升，平均 {avg_pct:+.2f}%)"
+            status_text = (
+                f"🔥 熱度極高 (族群強勢全面走升，平均 {avg_pct:+.2f}%)"
+            )
             color = "#d9534f"
         elif avg_pct >= 0.5:
-            status_text = f"📈 熱度增溫 (偏多震盪上揚，平均 {avg_pct:+.2f}%)"
+            status_text = (
+                f"📈 熱度增溫 (偏多震盪上揚，平均 {avg_pct:+.2f}%)"
+            )
             color = "#d9534f"
         elif down_count == valid_count or (avg_pct <= -2.0 and up_count == 0):
-            status_text = f"🩸 熱度退燒 (族群弱勢全面走跌，平均 {avg_pct:+.2f}%)"
+            status_text = (
+                f"🩸 熱度退燒 (族群弱勢全面走跌，平均 {avg_pct:+.2f}%)"
+            )
             color = "#5cb85c"
         elif avg_pct <= -0.5:
-            status_text = f"📉 觀望修正 (偏空震盪拉回，平均 {avg_pct:+.2f}%)"
+            status_text = (
+                f"📉 觀望修正 (偏空震盪拉回，平均 {avg_pct:+.2f}%)"
+            )
             color = "#5cb85c"
         else:
-            status_text = f"⚖️ 溫和盤整 (多空分歧整理，平均 {avg_pct:+.2f}%)"
+            status_text = (
+                f"⚖️ 溫和盤整 (多空分歧整理，平均 {avg_pct:+.2f}%)"
+            )
             color = "#337ab7"
 
     return {
@@ -602,8 +613,7 @@ def get_financial_and_analyst_data(ticker: yf.Ticker) -> dict:
     return fin_data
 
 
-def get_margin_trading_data(stock_id: str, days: int = 10) -> dict:
-    """改為由 Yahoo 股市即時網頁爬取信用交易與當沖資料"""
+def get_margin_trading_data(stock_id: str) -> dict:
     result = {
         "summary": "無數據",
         "signals": [],
@@ -628,24 +638,33 @@ def get_margin_trading_data(stock_id: str, days: int = 10) -> dict:
             m_diff_match = re.search(r"融資增減[^\d\-+]*([-+]?\d[\d,]*)", text)
             s_diff_match = re.search(r"融券增減[^\d\-+]*([-+]?\d[\d,]*)", text)
 
-            m_diff = int(m_diff_match.group(1).replace(",", "")) if m_diff_match else 0
-            s_diff = int(s_diff_match.group(1).replace(",", "")) if s_diff_match else 0
+            m_diff = (
+                int(m_diff_match.group(1).replace(",", ""))
+                if m_diff_match
+                else 0
+            )
+            s_diff = (
+                int(s_diff_match.group(1).replace(",", ""))
+                if s_diff_match
+                else 0
+            )
 
             result["summary"] = (
                 f"融資餘額: {m_balance:,}張 ({m_diff:+,}張) | "
                 f"融券餘額: {s_balance:,}張 ({s_diff:+,}張)"
             )
 
-            # 建立表格顯示
             today_str = datetime.now().strftime("%Y-%m-%d")
             display_df = pd.DataFrame(
-                [{
-                    "日期": today_str,
-                    "融資餘額": f"{m_balance:,}",
-                    "融資增減": f"{m_diff:+,}",
-                    "融券餘額": f"{s_balance:,}",
-                    "融券增減": f"{s_diff:+,}"
-                }]
+                [
+                    {
+                        "日期": today_str,
+                        "融資餘額(張)": f"{m_balance:,}",
+                        "融資增減(張)": f"{m_diff:+,}",
+                        "融券餘額(張)": f"{s_balance:,}",
+                        "融券增減(張)": f"{s_diff:+,}",
+                    }
+                ]
             )
             result["margin_df"] = display_df
     except Exception as e:
@@ -653,8 +672,7 @@ def get_margin_trading_data(stock_id: str, days: int = 10) -> dict:
     return result
 
 
-def get_day_trading_data(stock_id: str, days: int = 10) -> dict:
-    """由 Yahoo 股市頁面取得當沖概況"""
+def get_day_trading_data(stock_id: str) -> dict:
     result = {
         "summary": "無數據",
         "signals": [],
@@ -672,10 +690,18 @@ def get_day_trading_data(stock_id: str, days: int = 10) -> dict:
             vol = int(vol_match.group(1).replace(",", "")) if vol_match else 0
 
             if ratio > 0 or vol > 0:
-                result["summary"] = f"最新當沖量: {vol:,}張 | 當沖比率: {ratio:.1f}%"
+                result["summary"] = (
+                    f"最新當沖量: {vol:,}張 | 當沖比率: {ratio:.1f}%"
+                )
                 today_str = datetime.now().strftime("%Y-%m-%d")
                 result["day_trade_df"] = pd.DataFrame(
-                    [{"日期": today_str, "當沖張數": f"{vol:,}", "當沖比率(%)": f"{ratio:.1f}%"}]
+                    [
+                        {
+                            "日期": today_str,
+                            "當沖張數(張)": f"{vol:,}",
+                            "當沖比率(%)": f"{ratio:.1f}%",
+                        }
+                    ]
                 )
     except Exception as e:
         print(f"當沖資料抓取失敗: {e}")
@@ -723,16 +749,24 @@ def get_tech_data(stock_id: str, stock_name: str) -> dict:
         signals.extend(fin_data["fundamental_signals"])
 
         if close_price >= ma20 and close_price >= ma60:
-            ma_analysis_str = f"處於多頭格局，月線(${ma20:.1f}) 與季線(${ma60:.1f}) 為下檔強支撐"
+            ma_analysis_str = (
+                f"處於多頭格局，月線(${ma20:.1f}) 與季線(${ma60:.1f}) 為下檔強支撐"
+            )
             signals.append(f"• [均線支撐] {ma_analysis_str}")
         elif close_price < ma20 and close_price < ma60:
-            ma_analysis_str = f"處於空頭格局，上方面臨月線(${ma20:.1f}) 與季線(${ma60:.1f}) 反壓"
+            ma_analysis_str = (
+                f"處於空頭格局，上方面臨月線(${ma20:.1f}) 與季線(${ma60:.1f}) 反壓"
+            )
             signals.append(f"• [均線壓力] {ma_analysis_str}")
         elif close_price >= ma20 and close_price < ma60:
-            ma_analysis_str = f"站上月線支撐(${ma20:.1f})，但上方面臨季線(${ma60:.1f}) 下彎壓力"
+            ma_analysis_str = (
+                f"站上月線支撐(${ma20:.1f})，但上方面臨季線(${ma60:.1f}) 下彎壓力"
+            )
             signals.append(f"• [均線交會] {ma_analysis_str}")
         else:
-            ma_analysis_str = f"跌破月線壓力(${ma20:.1f})，回測季線支撐(${ma60:.1f})"
+            ma_analysis_str = (
+                f"跌破月線壓力(${ma20:.1f})，回測季線支撐(${ma60:.1f})"
+            )
             signals.append(f"• [均線交會] {ma_analysis_str}")
 
         bias_str = f"20MA 乖離率: {bias_20:+.2f}%"
@@ -808,35 +842,69 @@ def get_tech_data(stock_id: str, stock_name: str) -> dict:
         return {"error": "資料處理異常"}
 
 
-def get_chip_data(stock_id: str, days: int = 10) -> pd.DataFrame:
-    """依照 gemini-code-1788919614393 解析 Yahoo 法人買賣超頁面，修復法人籌碼數據"""
+def get_chip_data(stock_id: str, days: int = 20) -> pd.DataFrame:
+    """全面強化法人數據補強：透過 FinMind API 抓取並清理三大法人買賣超資料"""
     try:
-        url = f"https://tw.stock.yahoo.com/quote/{stock_id}/institutional-trading"
-        res = requests.get(url, headers=HEADERS, timeout=4)
-        if res.status_code == 200:
-            text = BeautifulSoup(res.text, "html.parser").get_text()
+        start_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        url = "https://api.finmindtrade.com/api/v4/data"
+        params = {
+            "dataset": "TaiwanStockInstitutionalInvestorsBuySell",
+            "data_id": stock_id,
+            "start_date": start_date,
+        }
+        res = requests.get(url, params=params, headers=HEADERS, timeout=5)
+        data = res.json()
 
-            pats = {
-                "外資": r"外資[^\d\-+]*?([-+]?\d[\d,]*)\s*張",
-                "投信": r"投信[^\d\-+]*?([-+]?\d[\d,]*)\s*張",
-                "自營商": r"自營商[^\d\-+]*?([-+]?\d[\d,]*)\s*張",
-                "主力": r"主力[^\d\-+]*?([-+]?\d[\d,]*)\s*張",
+        if data.get("msg") == "success" and data.get("data"):
+            raw_df = pd.DataFrame(data["data"])
+            raw_df["net_buy_vol"] = (
+                (raw_df["buy"] - raw_df["sell"]) / 1000
+            ).round(0)
+
+            # 簡化三大法人名稱映射
+            name_map = {
+                "Foreign_Investor": "外資",
+                "Foreign_Dealer_Self": "外資自營商",
+                "Investment_Trust": "投信",
+                "Dealer_Self": "自營商(自營)",
+                "Dealer_Hedging": "自營商(避險)",
             }
-            row_data = {}
-            for k, p in pats.items():
-                m = re.search(p, text)
-                if m:
-                    row_data[k] = int(m.group(1).replace(",", ""))
-                else:
-                    row_data[k] = 0
+            raw_df["name"] = raw_df["name"].map(lambda x: name_map.get(x, x))
 
-            row_data["三大法人合計"] = row_data["外資"] + row_data["投信"] + row_data["自營商"]
-            today_str = datetime.now().strftime("%Y-%m-%d")
+            pivot_df = raw_df.pivot_table(
+                index="date", columns="name", values="net_buy_vol", aggfunc="sum"
+            ).fillna(0)
 
-            df = pd.DataFrame([row_data], index=[today_str])
-            return df
+            # 確保必要欄位存在
+            for col in ["外資", "投信", "自營商(自營)", "自營商(避險)"]:
+                if col not in pivot_df.columns:
+                    pivot_df[col] = 0
+
+            pivot_df["三大法人合計"] = (
+                pivot_df["外資"]
+                + pivot_df["投信"]
+                + pivot_df["自營商(自營)"]
+                + pivot_df["自營商(避險)"]
+            )
+
+            # 轉為繁體格式並依照日期倒序排列
+            pivot_df = pivot_df.sort_index(ascending=False)
+            pivot_df.index.name = "日期"
+
+            # 格式化輸出
+            display_cols = [
+                "外資",
+                "投信",
+                "自營商(自營)",
+                "自營商(避險)",
+                "三大法人合計",
+            ]
+            final_df = pivot_df[[c for c in display_cols if c in pivot_df.columns]]
+            return final_df.astype(int)
+
     except Exception as e:
-        print(f"籌碼抓取失敗: {e}")
+        print(f"FinMind 法人籌碼抓取失敗: {e}")
+
     return pd.DataFrame()
 
 
@@ -973,23 +1041,23 @@ def analyze_trend(
     )
 
     if not chip_df.empty:
-        latest_chip = chip_df.iloc[-1]
+        latest_chip = chip_df.iloc[0]
         foreign_val = latest_chip.get("外資", 0)
         trust_val = latest_chip.get("投信", 0)
 
         if foreign_val > 0:
             score += 2
-            signals.append(f"• [籌碼利多] 外資呈現買超 ({foreign_val:,} 張) (+2分)")
+            signals.append(f"• [籌碼利多] 最新一日外資買超 ({foreign_val:,} 張) (+2分)")
         elif foreign_val < 0:
             score -= 2
-            signals.append(f"• [籌碼空頭] 外資呈現賣超 ({abs(foreign_val):,} 張) (-2分)")
+            signals.append(f"• [籌碼空頭] 最新一日外資賣超 ({abs(foreign_val):,} 張) (-2分)")
 
         if trust_val > 0:
             score += 2
-            signals.append(f"• [籌碼利多] 投信呈現買超 ({trust_val:,} 張) (+2分)")
+            signals.append(f"• [籌碼利多] 最新一日投信買超 ({trust_val:,} 張) (+2分)")
         elif trust_val < 0:
             score -= 2
-            signals.append(f"• [籌碼空頭] 投信呈現賣超 ({abs(trust_val):,} 張) (-2分)")
+            signals.append(f"• [籌碼空頭] 最新一日投信賣超 ({abs(trust_val):,} 張) (-2分)")
 
     if trend_status == "BEAR":
         trend = "📉 弱勢空頭 (受制於均線反壓)"
@@ -1017,15 +1085,17 @@ def analyze_trend(
 # 4. Streamlit Web UI 主介面
 # ==========================================
 st.title("📈 股市大亨 - 完整台股診斷系統 (Web版)")
-st.caption("同步證交所/櫃買中心官方產業類別，提供技術面、集保籌碼與財務綜合診斷")
+st.caption("同步證交所/櫃買中心官方產業類別，提供技術面、法人與信用籌碼綜合診斷")
 
+# 1. 將預設輸入框設為空白 (避免開啟就直接查詢 2330)
 with st.container():
     col_input, col_btn = st.columns([4, 1])
     with col_input:
         user_input = st.text_input(
             "請輸入股票代碼或中文名稱 (例: 2330 / 華通 / 欣興):",
-            value="2330",
+            value="",
             key="stock_input",
+            placeholder="請輸入台股代碼或名稱...",
         )
     with col_btn:
         st.write(" ")
@@ -1034,13 +1104,14 @@ with st.container():
             "完整分析", type="primary", use_container_width=True
         )
 
-if search_clicked or user_input:
+# 2. 只有當使用者按下按鈕或輸入框有值時才進行解析與執行
+if search_clicked or user_input.strip():
     with st.spinner("正在進行極速並行數據分析中..."):
         stock_id, stock_name = resolve_stock_info(user_input)
 
         with ThreadPoolExecutor(max_workers=7) as executor:
             future_tech = executor.submit(get_tech_data, stock_id, stock_name)
-            future_chip = executor.submit(get_chip_data, stock_id, 10)
+            future_chip = executor.submit(get_chip_data, stock_id, 20)
             future_margin = executor.submit(get_margin_trading_data, stock_id)
             future_day_trade = executor.submit(get_day_trading_data, stock_id)
             future_large_holders = executor.submit(
@@ -1152,7 +1223,7 @@ if search_clicked or user_input:
             tab1, tab2, tab3, tab4, tab5 = st.tabs(
                 [
                     "📋 權重分析訊號",
-                    "📊 法人買賣超動態",
+                    "📊 三大法人買賣超動態 (張)",
                     "💳 融資融券與當沖明細",
                     "🐋 最近集保大戶動態",
                     "📰 最新市場新聞",
@@ -1165,11 +1236,11 @@ if search_clicked or user_input:
                     st.info(sig)
 
             with tab2:
-                st.subheader("三大法人與主力買賣超張數")
+                st.subheader("三大法人買賣超近 20 日明細 (單位：張)")
                 if not chip_df.empty:
                     st.dataframe(chip_df, use_container_width=True)
                 else:
-                    st.write("尚無籌碼詳細數據。")
+                    st.write("尚無三大法人詳細籌碼數據。")
 
             with tab3:
                 st.subheader("信用交易與當沖明細")
@@ -1209,3 +1280,5 @@ if search_clicked or user_input:
                         st.write(f"📰 {news}")
                 else:
                     st.write("暫無即時新聞資料。")
+else:
+    st.info("💡 請在上方輸入框輸入股票代碼或名稱（例如：2330 或 華通）並按下「完整分析」按鈕。")
