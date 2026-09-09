@@ -466,7 +466,8 @@ def calculate_gap_levels(df: pd.DataFrame, max_lookback: int = 60) -> dict:
 
 
 def get_large_shareholders_data(stock_id: str) -> dict:
-    start_date = (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d")
+    """擷取 FinMind 集保戶數分級，完整計算大戶(>1000張)與散戶(<50張)持股動向"""
+    start_date = (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d")
     url = "https://api.finmindtrade.com/api/v4/data"
     params = {
         "dataset": "TaiwanStockDepositShare",
@@ -480,72 +481,85 @@ def get_large_shareholders_data(stock_id: str) -> dict:
         "history_df": pd.DataFrame(),
     }
     try:
-        res = requests.get(url, params=params, headers=HEADERS, timeout=4)
+        res = requests.get(url, params=params, headers=HEADERS, timeout=5)
         data = res.json()
         if data.get("msg") == "success" and data.get("data"):
             df = pd.DataFrame(data["data"])
             unique_dates = sorted(df["date"].unique())
 
-            large_df = df[df["holding_shares_level"] == 15].sort_values("date")
+            if len(unique_dates) >= 1:
+                # 彙整每週的「大戶」與「散戶」持股數據
+                history_records = []
+                for d in unique_dates:
+                    df_d = df[df["date"] == d]
+                    
+                    # 大戶: holding_shares_level == 15 (>1000張)
+                    large_row = df_d[df_d["holding_shares_level"] == 15]
+                    large_ratio = float(large_row["percent"].values[0]) if not large_row.empty else 0.0
+                    large_people = int(large_row["people"].values[0]) if not large_row.empty else 0
+                    
+                    # 散戶: holding_shares_level <= 9 (1~50張/1~50,000股)
+                    retail_rows = df_d[df_d["holding_shares_level"] <= 9]
+                    retail_ratio = float(retail_rows["percent"].sum()) if not retail_rows.empty else 0.0
+                    retail_people = int(retail_rows["people"].sum()) if not retail_rows.empty else 0
+                    
+                    history_records.append({
+                        "集保日期": d,
+                        "大戶持股比(%)": round(large_ratio, 2),
+                        "大戶人數(人)": large_people,
+                        "散戶持股比(%)": round(retail_ratio, 2),
+                        "散戶人數(人)": retail_people,
+                    })
 
-            if not large_df.empty:
-                history_df = large_df.tail(5)[
-                    ["date", "percent", "people"]
-                ].copy()
-                history_df.rename(
-                    columns={
-                        "date": "集保日期",
-                        "percent": "大戶持股比例(%)",
-                        "people": "大戶人數(人)",
-                    },
-                    inplace=True,
-                )
-                result["history_df"] = history_df
+                history_df = pd.DataFrame(history_records).sort_values("集保日期", ascending=False)
+                result["history_df"] = history_df.head(8)
 
-            if len(unique_dates) >= 2:
-                latest_friday = unique_dates[-1]
-                prev_friday = unique_dates[-2]
+                if len(unique_dates) >= 2:
+                    latest_d = unique_dates[-1]
+                    prev_d = unique_dates[-2]
 
-                df_latest = df[df["date"] == latest_friday]
-                df_prev = df[df["date"] == prev_friday]
+                    latest_rec = history_df[history_df["集保日期"] == latest_d].iloc[0]
+                    prev_rec = history_df[history_df["集保日期"] == prev_d].iloc[0]
 
-                large_latest = df_latest[
-                    df_latest["holding_shares_level"] == 15
-                ]
-                large_prev = df_prev[df_prev["holding_shares_level"] == 15]
+                    # 大戶變動
+                    l_ratio_diff = latest_rec["大戶持股比(%)"] - prev_rec["大戶持股比(%)"]
+                    l_people_diff = latest_rec["大戶人數(人)"] - prev_rec["大戶人數(人)"]
 
-                if not large_latest.empty and not large_prev.empty:
-                    ratio_now = float(large_latest["percent"].values[0])
-                    ratio_prev = float(large_prev["percent"].values[0])
-                    diff_ratio = ratio_now - ratio_prev
+                    # 散戶變動
+                    r_ratio_diff = latest_rec["散戶持股比(%)"] - prev_rec["散戶持股比(%)"]
+                    r_people_diff = latest_rec["散戶人數(人)"] - prev_rec["散戶人數(人)"]
 
-                    people_now = int(large_latest["people"].values[0])
-                    people_prev = int(large_prev["people"].values[0])
-                    diff_people = people_now - people_prev
-
-                    arrow_ratio = (
-                        "⬆️"
-                        if diff_ratio > 0
-                        else ("⬇️" if diff_ratio < 0 else "➡️")
-                    )
+                    l_arrow = "⬆️" if l_ratio_diff > 0 else ("⬇️" if l_ratio_diff < 0 else "➡️")
+                    r_arrow = "⬆️" if r_ratio_diff > 0 else ("⬇️" if r_ratio_diff < 0 else "➡️")
 
                     result["summary"] = (
-                        f"[{latest_friday}] 集保大戶: {ratio_now:.2f}% ({arrow_ratio} {diff_ratio:+.2f}%) | "
-                        f"人數: {people_now}人 ({diff_people:+}人)"
+                        f"[{latest_d}] 🏰 大戶(>1k張): {latest_rec['大戶持股比(%)']:.2f}% ({l_arrow} {l_ratio_diff:+.2f}%) | "
+                        f"🐟 散戶(<50張): {latest_rec['散戶持股比(%)']:.2f}% ({r_arrow} {r_ratio_diff:+.2f}%)"
                     )
 
-                    if diff_ratio >= 0.3:
+                    # 籌碼籌碼集中度籌碼診斷 logic
+                    if l_ratio_diff >= 0.3 and r_ratio_diff <= -0.2:
+                        result["score_change"] = 3
+                        result["signals"].append(
+                            f"• [集保籌碼強勢] 上週({latest_d}) 籌碼大幅集中！大戶持股 +{l_ratio_diff:.2f}%，散戶退場 {r_ratio_diff:+.2f}% (+3分)"
+                        )
+                    elif l_ratio_diff >= 0.3:
                         result["score_change"] = 2
                         result["signals"].append(
-                            f"• [集保籌碼] 最新一期({latest_friday}) 集保大戶持股增加 {diff_ratio:+.2f}% 至 {ratio_now:.2f}% (+2分)"
+                            f"• [集保籌碼] 上週({latest_d}) 大戶持股增加 {l_ratio_diff:+.2f}% (大戶人數 {l_people_diff:+}人) (+2分)"
                         )
-                    elif diff_ratio <= -0.3:
+                    elif l_ratio_diff <= -0.3 and r_ratio_diff >= 0.2:
+                        result["score_change"] = -3
+                        result["signals"].append(
+                            f"• [集保籌碼分散] 上週({latest_d}) 籌碼流向散戶！大戶減持 {l_ratio_diff:+.2f}%，散戶接盤 +{r_ratio_diff:.2f}% (-3分)"
+                        )
+                    elif l_ratio_diff <= -0.3:
                         result["score_change"] = -2
                         result["signals"].append(
-                            f"• [集保籌碼] 最新一期({latest_friday}) 集保大戶持股減少 {diff_ratio:+.2f}% 至 {ratio_now:.2f}% (-2分)"
+                            f"• [集保籌碼] 上週({latest_d}) 大戶持股減少 {l_ratio_diff:+.2f}% (大戶人數 {l_people_diff:+}人) (-2分)"
                         )
     except Exception as e:
-        print(f"集保大戶資料抓取失敗: {e}")
+        print(f"集保大戶散戶資料抓取失敗: {e}")
     return result
 
 
@@ -614,7 +628,6 @@ def get_financial_and_analyst_data(ticker: yf.Ticker) -> dict:
 
 
 def get_margin_trading_data(stock_id: str, days: int = 20) -> dict:
-    """透過 FinMind API 抓取融資融券真實數據"""
     result = {
         "summary": "無數據",
         "signals": [],
@@ -637,7 +650,6 @@ def get_margin_trading_data(stock_id: str, days: int = 20) -> dict:
                 df = df.sort_values("date", ascending=False)
                 latest = df.iloc[0]
 
-                # 取出融資餘額與融券餘額 (FinMind 單位為股/張數)
                 m_balance = int(latest.get("MarginPurchaseTodayBalance", 0))
                 m_diff = int(latest.get("MarginPurchaseBuy", 0)) - int(latest.get("MarginPurchaseSell", 0))
                 s_balance = int(latest.get("ShortSaleTodayBalance", 0))
@@ -648,7 +660,6 @@ def get_margin_trading_data(stock_id: str, days: int = 20) -> dict:
                     f"融券餘額: {s_balance:,}張 ({s_diff:+,}張)"
                 )
 
-                # 建立前幾日明細表
                 df_display = df.head(10).copy()
                 df_display["融資增減"] = df_display["MarginPurchaseBuy"] - df_display["MarginPurchaseSell"]
                 df_display["融券增減"] = df_display["ShortSaleBuy"] - df_display["ShortSaleSell"]
@@ -665,7 +676,6 @@ def get_margin_trading_data(stock_id: str, days: int = 20) -> dict:
 
 
 def get_day_trading_data(stock_id: str, days: int = 20) -> dict:
-    """透過 FinMind API 抓取當沖交易真實數據"""
     result = {
         "summary": "無數據",
         "signals": [],
@@ -840,7 +850,6 @@ def get_tech_data(stock_id: str, stock_name: str) -> dict:
 
 
 def get_chip_data(stock_id: str, days: int = 20) -> pd.DataFrame:
-    """透過 FinMind API 抓取三大法人買賣超資料"""
     try:
         start_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
         url = "https://api.finmindtrade.com/api/v4/data"
@@ -1194,7 +1203,7 @@ if search_clicked or user_input.strip():
                     f"PB `{tech_data.get('pb_ratio', '無數據')}`"
                 )
                 st.markdown(
-                    f"**🐋 集保大戶動態：** {large_holders_data.get('summary', '無數據')}"
+                    f"**🐋 集保大戶與散戶：** {large_holders_data.get('summary', '無數據')}"
                 )
                 st.markdown(
                     f"**💳 融資融券(最新)：** {margin_data.get('summary', '無數據')}"
@@ -1216,7 +1225,7 @@ if search_clicked or user_input.strip():
                     "📋 權重分析訊號",
                     "📊 三大法人買賣超動態 (張)",
                     "💳 融資融券與當沖明細",
-                    "🐋 最近集保大戶動態",
+                    "🐋 集保大戶與散戶動態",
                     "📰 最新市場新聞",
                 ]
             )
@@ -1255,7 +1264,7 @@ if search_clicked or user_input.strip():
                         st.write("無當沖明細。")
 
             with tab4:
-                st.subheader("最近 5 週集保大戶持股集中度趨勢")
+                st.subheader("最近 8 週大戶(>1k張)與散戶(<50張)持股變動趨勢")
                 if not large_holders_data["history_df"].empty:
                     st.dataframe(
                         large_holders_data["history_df"],
