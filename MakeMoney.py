@@ -465,101 +465,132 @@ def calculate_gap_levels(df: pd.DataFrame, max_lookback: int = 60) -> dict:
     return res
 
 
+# ==========================================
+# 方案二：TDCC 臺灣集中保管結算所 Open Data 模組
+# ==========================================
+@st.cache_data(ttl=3600)
+def fetch_tdcc_official_csv():
+    """爬取 TDCC 台灣集保結算所每週最新的全市場集保戶數分級檔 (快取1小時)"""
+    url = "https://smart.tdcc.com.tw/opendata/getopendata.ashx?id=1-5"
+    try:
+        df = pd.read_csv(url, encoding="utf-8")
+        return df
+    except Exception:
+        try:
+            df = pd.read_csv(url, encoding="big5")
+            return df
+        except Exception as e:
+            print(f"TDCC 官方 CSV 下載失敗: {e}")
+            return pd.DataFrame()
+
+
 def get_large_shareholders_data(stock_id: str) -> dict:
-    """擷取 FinMind 集保戶數分級，完整計算大戶(>1000張)與散戶(<50張)持股動向"""
-    start_date = (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d")
-    url = "https://api.finmindtrade.com/api/v4/data"
-    params = {
-        "dataset": "TaiwanStockDepositShare",
-        "data_id": stock_id,
-        "start_date": start_date,
-    }
+    """直接解析 TDCC 官方集保 Open Data，比對最新與上一週的大戶與散戶持股增減"""
     result = {
         "summary": "無集保數據",
         "score_change": 0,
         "signals": [],
         "history_df": pd.DataFrame(),
     }
+    
+    raw_df = fetch_tdcc_official_csv()
+    if raw_df.empty:
+        return result
+
     try:
-        res = requests.get(url, params=params, headers=HEADERS, timeout=5)
-        data = res.json()
-        if data.get("msg") == "success" and data.get("data"):
-            df = pd.DataFrame(data["data"])
-            unique_dates = sorted(df["date"].unique())
+        # 清理與統一欄位名稱 (常見: 資料日期, 證券代號, 持股分級, 人數, 股數, 占集保庫存數比例%)
+        raw_df.columns = [c.strip() for c in raw_df.columns]
+        
+        # 篩選個股
+        stock_df = raw_df[raw_df["證券代號"].astype(str).str.strip() == str(stock_id).strip()].copy()
+        
+        if stock_df.empty:
+            return result
 
-            if len(unique_dates) >= 1:
-                # 彙整每週的「大戶」與「散戶」持股數據
-                history_records = []
-                for d in unique_dates:
-                    df_d = df[df["date"] == d]
-                    
-                    # 大戶: holding_shares_level == 15 (>1000張)
-                    large_row = df_d[df_d["holding_shares_level"] == 15]
-                    large_ratio = float(large_row["percent"].values[0]) if not large_row.empty else 0.0
-                    large_people = int(large_row["people"].values[0]) if not large_row.empty else 0
-                    
-                    # 散戶: holding_shares_level <= 9 (1~50張/1~50,000股)
-                    retail_rows = df_d[df_d["holding_shares_level"] <= 9]
-                    retail_ratio = float(retail_rows["percent"].sum()) if not retail_rows.empty else 0.0
-                    retail_people = int(retail_rows["people"].sum()) if not retail_rows.empty else 0
-                    
-                    history_records.append({
-                        "集保日期": d,
-                        "大戶持股比(%)": round(large_ratio, 2),
-                        "大戶人數(人)": large_people,
-                        "散戶持股比(%)": round(retail_ratio, 2),
-                        "散戶人數(人)": retail_people,
-                    })
+        # 轉數字格式
+        stock_df["持股分級"] = pd.to_numeric(stock_df["持股分級"], errors="coerce")
+        stock_df["人數"] = pd.to_numeric(stock_df["人數"], errors="coerce")
+        stock_df["占集保庫存數比例%"] = pd.to_numeric(stock_df["占集保庫存數比例%"], errors="coerce")
+        stock_df["資料日期"] = stock_df["資料日期"].astype(str).str.strip()
 
-                history_df = pd.DataFrame(history_records).sort_values("集保日期", ascending=False)
-                result["history_df"] = history_df.head(8)
+        # 獲取出現的日期（按新到舊排序）
+        unique_dates = sorted(stock_df["資料日期"].unique(), reverse=True)
 
-                if len(unique_dates) >= 2:
-                    latest_d = unique_dates[-1]
-                    prev_d = unique_dates[-2]
+        history_records = []
+        for d in unique_dates:
+            df_d = stock_df[stock_df["資料日期"] == d]
+            
+            # 大戶: 持股分級 == 15 (>1000張 / 1,000,001股以上)
+            large_row = df_d[df_d["持股分級"] == 15]
+            large_ratio = float(large_row["占集保庫存數比例%"].values[0]) if not large_row.empty else 0.0
+            large_people = int(large_row["人數"].values[0]) if not large_row.empty else 0
 
-                    latest_rec = history_df[history_df["集保日期"] == latest_d].iloc[0]
-                    prev_rec = history_df[history_df["集保日期"] == prev_d].iloc[0]
+            # 散戶: 持股分級 <= 9 (1~50張 / 1~50,000股)
+            retail_rows = df_d[df_d["持股分級"] <= 9]
+            retail_ratio = float(retail_rows["占集保庫存數比例%"].sum()) if not retail_rows.empty else 0.0
+            retail_people = int(retail_rows["人數"].sum()) if not retail_rows.empty else 0
 
-                    # 大戶變動
-                    l_ratio_diff = latest_rec["大戶持股比(%)"] - prev_rec["大戶持股比(%)"]
-                    l_people_diff = latest_rec["大戶人數(人)"] - prev_rec["大戶人數(人)"]
+            history_records.append({
+                "集保日期": d,
+                "大戶持股比(%)": round(large_ratio, 2),
+                "大戶人數(人)": large_people,
+                "散戶持股比(%)": round(retail_ratio, 2),
+                "散戶人數(人)": retail_people,
+            })
 
-                    # 散戶變動
-                    r_ratio_diff = latest_rec["散戶持股比(%)"] - prev_rec["散戶持股比(%)"]
-                    r_people_diff = latest_rec["散戶人數(人)"] - prev_rec["散戶人數(人)"]
+        history_df = pd.DataFrame(history_records)
+        result["history_df"] = history_df
 
-                    l_arrow = "⬆️" if l_ratio_diff > 0 else ("⬇️" if l_ratio_diff < 0 else "➡️")
-                    r_arrow = "⬆️" if r_ratio_diff > 0 else ("⬇️" if r_ratio_diff < 0 else "➡️")
+        if len(history_records) >= 1:
+            latest = history_records[0]
+            
+            # 若包含至少 2 週資料，進行前後增減比較
+            if len(history_records) >= 2:
+                prev = history_records[1]
+                l_ratio_diff = latest["大戶持股比(%)"] - prev["大戶持股比(%)"]
+                l_people_diff = latest["大戶人數(人)"] - prev["大戶人數(人)"]
+                r_ratio_diff = latest["散戶持股比(%)"] - prev["散戶持股比(%)"]
 
-                    result["summary"] = (
-                        f"[{latest_d}] 🏰 大戶(>1k張): {latest_rec['大戶持股比(%)']:.2f}% ({l_arrow} {l_ratio_diff:+.2f}%) | "
-                        f"🐟 散戶(<50張): {latest_rec['散戶持股比(%)']:.2f}% ({r_arrow} {r_ratio_diff:+.2f}%)"
+                l_arrow = "⬆️" if l_ratio_diff > 0 else ("⬇️" if l_ratio_diff < 0 else "➡️")
+                r_arrow = "⬆️" if r_ratio_diff > 0 else ("⬇️" if r_ratio_diff < 0 else "➡️")
+
+                result["summary"] = (
+                    f"[{latest['集保日期']}] 🏰 大戶(>1k張): {latest['大戶持股比(%)']:.2f}% ({l_arrow} {l_ratio_diff:+.2f}%) | "
+                    f"🐟 散戶(<50張): {latest['散戶持股比(%)']:.2f}% ({r_arrow} {r_ratio_diff:+.2f}%)"
+                )
+
+                # 集保籌碼診斷評分
+                if l_ratio_diff >= 0.3 and r_ratio_diff <= -0.2:
+                    result["score_change"] = 3
+                    result["signals"].append(
+                        f"• [集保籌碼強勢] 上週({latest['集保日期']}) 籌碼大幅集中！大戶持股 +{l_ratio_diff:.2f}%，散戶退場 {r_ratio_diff:+.2f}% (+3分)"
                     )
+                elif l_ratio_diff >= 0.3:
+                    result["score_change"] = 2
+                    result["signals"].append(
+                        f"• [集保籌碼] 上週({latest['集保日期']}) 大戶持股增加 {l_ratio_diff:+.2f}% (大戶人數 {l_people_diff:+}人) (+2分)"
+                    )
+                elif l_ratio_diff <= -0.3 and r_ratio_diff >= 0.2:
+                    result["score_change"] = -3
+                    result["signals"].append(
+                        f"• [集保籌碼分散] 上週({latest['集保日期']}) 籌碼流向散戶！大戶減持 {l_ratio_diff:+.2f}%，散戶接盤 +{r_ratio_diff:.2f}% (-3分)"
+                    )
+                elif l_ratio_diff <= -0.3:
+                    result["score_change"] = -2
+                    result["signals"].append(
+                        f"• [集保籌碼] 上週({latest['集保日期']}) 大戶持股減少 {l_ratio_diff:+.2f}% (大戶人數 {l_people_diff:+}人) (-2分)"
+                    )
+            else:
+                # 只有一週資料時顯示基礎分布
+                result["summary"] = (
+                    f"[{latest['集保日期']}] 🏰 大戶(>1k張): {latest['大戶持股比(%)']:.2f}% ({latest['大戶人數(人)']:,}人) | "
+                    f"🐟 散戶(<50張): {latest['散戶持股比(%)']:.2f}% ({latest['散戶人數(人)']:,}人)"
+                )
+                result["signals"].append(f"• [最新集保分佈] {result['summary']}")
 
-                    # 籌碼籌碼集中度籌碼診斷 logic
-                    if l_ratio_diff >= 0.3 and r_ratio_diff <= -0.2:
-                        result["score_change"] = 3
-                        result["signals"].append(
-                            f"• [集保籌碼強勢] 上週({latest_d}) 籌碼大幅集中！大戶持股 +{l_ratio_diff:.2f}%，散戶退場 {r_ratio_diff:+.2f}% (+3分)"
-                        )
-                    elif l_ratio_diff >= 0.3:
-                        result["score_change"] = 2
-                        result["signals"].append(
-                            f"• [集保籌碼] 上週({latest_d}) 大戶持股增加 {l_ratio_diff:+.2f}% (大戶人數 {l_people_diff:+}人) (+2分)"
-                        )
-                    elif l_ratio_diff <= -0.3 and r_ratio_diff >= 0.2:
-                        result["score_change"] = -3
-                        result["signals"].append(
-                            f"• [集保籌碼分散] 上週({latest_d}) 籌碼流向散戶！大戶減持 {l_ratio_diff:+.2f}%，散戶接盤 +{r_ratio_diff:.2f}% (-3分)"
-                        )
-                    elif l_ratio_diff <= -0.3:
-                        result["score_change"] = -2
-                        result["signals"].append(
-                            f"• [集保籌碼] 上週({latest_d}) 大戶持股減少 {l_ratio_diff:+.2f}% (大戶人數 {l_people_diff:+}人) (-2分)"
-                        )
     except Exception as e:
-        print(f"集保大戶散戶資料抓取失敗: {e}")
+        print(f"解析 TDCC 集保資料失敗: {e}")
+
     return result
 
 
@@ -1264,7 +1295,7 @@ if search_clicked or user_input.strip():
                         st.write("無當沖明細。")
 
             with tab4:
-                st.subheader("最近 8 週大戶(>1k張)與散戶(<50張)持股變動趨勢")
+                st.subheader("最近集保大戶(>1k張)與散戶(<50張)持股變動明細")
                 if not large_holders_data["history_df"].empty:
                     st.dataframe(
                         large_holders_data["history_df"],
