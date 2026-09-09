@@ -131,7 +131,7 @@ def load_taiwan_stock_official_list():
 
 
 # ==========================================
-# 3. 核心抓取與算號邏輯 (完全保留 PC 版)
+# 3. 核心抓取與算號邏輯
 # ==========================================
 def fetch_chinese_name_online(stock_id: str) -> str:
     try:
@@ -457,15 +457,16 @@ def calculate_gap_levels(df: pd.DataFrame, max_lookback: int = 60) -> dict:
     return res
 
 
+# 改名為集保大戶資料擷取（擷取最近集保大戶資料）
 def get_large_shareholders_data(stock_id: str) -> dict:
-    start_date = (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d")
+    start_date = (datetime.now() - timedelta(days=40)).strftime("%Y-%m-%d")
     url = "https://api.finmindtrade.com/api/v4/data"
     params = {
         "dataset": "TaiwanStockDepositShare",
         "data_id": stock_id,
         "start_date": start_date,
     }
-    result = {"summary": "無數據", "score_change": 0, "signals": []}
+    result = {"summary": "無集保數據", "score_change": 0, "signals": []}
     try:
         res = requests.get(url, params=params, headers=HEADERS, timeout=4)
         data = res.json()
@@ -476,7 +477,6 @@ def get_large_shareholders_data(stock_id: str) -> dict:
             if len(unique_dates) >= 1:
                 latest_date = unique_dates[-1]
                 df_latest = df[df["date"] == latest_date]
-
                 large_latest = df_latest[
                     df_latest["holding_shares_level"] == 15
                 ]
@@ -488,14 +488,15 @@ def get_large_shareholders_data(stock_id: str) -> dict:
                     if len(unique_dates) >= 2:
                         prev_date = unique_dates[-2]
                         df_prev = df[df["date"] == prev_date]
-                        large_prev = df_prev[df_prev["holding_shares_level"] == 15]
+                        large_prev = df_prev[
+                            df_prev["holding_shares_level"] == 15
+                        ]
 
                         if not large_prev.empty:
                             ratio_prev = float(large_prev["percent"].values[0])
                             people_prev = int(large_prev["people"].values[0])
                             diff_ratio = ratio_now - ratio_prev
                             diff_people = people_now - people_prev
-
                             arrow_ratio = (
                                 "⬆️"
                                 if diff_ratio > 0
@@ -503,24 +504,32 @@ def get_large_shareholders_data(stock_id: str) -> dict:
                             )
 
                             result["summary"] = (
-                                f"[{latest_date}] 集保大戶: {ratio_now:.2f}% ({arrow_ratio} {diff_ratio:+.2f}%) | "
+                                f"[{latest_date}] 集保大戶(>1000張): {ratio_now:.2f}% ({arrow_ratio} {diff_ratio:+.2f}%) | "
                                 f"人數: {people_now}人 ({diff_people:+}人)"
                             )
 
                             if diff_ratio >= 0.3:
                                 result["score_change"] = 2
                                 result["signals"].append(
-                                    f"• [集保大戶] 最新期({latest_date}) 集保大戶持股增加 {diff_ratio:+.2f}% 至 {ratio_now:.2f}% (+2分)"
+                                    f"• [集保大戶籌碼] 最新一期({latest_date}) 集保大戶持股增加 {diff_ratio:+.2f}% 至 {ratio_now:.2f}% (+2分)"
                                 )
                             elif diff_ratio <= -0.3:
                                 result["score_change"] = -2
                                 result["signals"].append(
-                                    f"• [集保大戶] 最新期({latest_date}) 集保大戶持股減少 {diff_ratio:+.2f}% 至 {ratio_now:.2f}% (-2分)"
+                                    f"• [集保大戶籌碼] 最新一期({latest_date}) 集保大戶持股減少 {diff_ratio:+.2f}% 至 {ratio_now:.2f}% (-2分)"
+                                )
+                            else:
+                                result["signals"].append(
+                                    f"• [集保大戶籌碼] 最新一期({latest_date}) 集保大戶持股比例為 {ratio_now:.2f}% (變動 {diff_ratio:+.2f}%)"
                                 )
                         else:
-                            result["summary"] = f"[{latest_date}] 集保大戶: {ratio_now:.2f}% | 人數: {people_now}人"
+                            result["summary"] = (
+                                f"[{latest_date}] 集保大戶: {ratio_now:.2f}% | 人數: {people_now}人"
+                            )
                     else:
-                        result["summary"] = f"[{latest_date}] 集保大戶: {ratio_now:.2f}% | 人數: {people_now}人"
+                        result["summary"] = (
+                            f"[{latest_date}] 集保大戶: {ratio_now:.2f}% | 人數: {people_now}人"
+                        )
     except Exception as e:
         print(f"集保大戶資料抓取失敗: {e}")
     return result
@@ -620,8 +629,11 @@ def get_margin_trading_data(stock_id: str, days: int = 10) -> dict:
                 s_balance = int(last_row.get("ShortSaleTodayBalance", 0))
 
                 result["summary"] = (
-                    f"融資: {m_balance:,}張 ({margin_diff:+,}張) | "
-                    f"融券: {s_balance:,}張 ({short_diff:+,}張)"
+                    f"融資餘額: {m_balance:,}張 (5日累積: {margin_diff:+,}張) | "
+                    f"融券餘額: {s_balance:,}張 (5日累積: {short_diff:+,}張)"
+                )
+                result["signals"].append(
+                    f"• [信用交易] 近5日融資變動: {margin_diff:+,}張，融券變動: {short_diff:+,}張 (最新融資餘額: {m_balance:,}張, 融券餘額: {s_balance:,}張)"
                 )
     except Exception as e:
         print(f"融資融券抓取失敗: {e}")
@@ -651,6 +663,9 @@ def get_day_trading_data(stock_id: str, days: int = 10) -> dict:
 
                 result["summary"] = (
                     f"最新當沖量: {vol:,}張 | 當沖比率: {ratio:.1f}%"
+                )
+                result["signals"].append(
+                    f"• [當沖熱度] 最新單日當沖成交量: {vol:,}張，當沖佔比: {ratio:.1f}%"
                 )
     except Exception as e:
         print(f"當沖資料抓取失敗: {e}")
@@ -853,21 +868,31 @@ def analyze_trend(
         f"• [市場與產業標籤] {full_group} | 動態評估: {group_status['status_text']}"
     )
 
+    if margin_data.get("signals"):
+        signals.extend(margin_data["signals"])
+
+    if day_trade_data.get("signals"):
+        signals.extend(day_trade_data["signals"])
+
+    if large_holders_data.get("signals"):
+        score += large_holders_data.get("score_change", 0)
+        signals.extend(large_holders_data["signals"])
+
     if not chip_df.empty:
-        recent_chips = chip_df.tail(5)
+        recent_chips = chip_df.tail(10)
         foreign_total = recent_chips.get("Foreign_Investor", pd.Series([0])).sum()
         trust_total = recent_chips.get("Investment_Trust", pd.Series([0])).sum()
 
         if foreign_total > 0:
             score += 2
-            signals.append(f"• [籌碼主軸] 外資近 5 日累計買超 {int(foreign_total):,} 張 (+2分)")
+            signals.append(f"• [籌碼主軸] 外資近 10 日累計買超 {int(foreign_total):,} 張 (+2分)")
         else:
             score -= 2
-            signals.append(f"• [籌碼主軸] 外資近 5 日累計賣超 {int(abs(foreign_total)):,} 張 (-2分)")
+            signals.append(f"• [籌碼主軸] 外資近 10 日累計賣超 {int(abs(foreign_total)):,} 張 (-2分)")
 
         if trust_total > 0:
             score += 2
-            signals.append(f"• [籌碼主軸] 投信近 5 日累計買超 {int(trust_total):,} 張 (+2分)")
+            signals.append(f"• [籌碼主軸] 投信近 10 日累計買超 {int(trust_total):,} 張 (+2分)")
 
     if trend_status == "BEAR":
         trend = "📉 弱勢空頭 (受制於均線反壓)"
@@ -895,7 +920,7 @@ def analyze_trend(
 # 4. Streamlit Web UI 主介面
 # ==========================================
 st.title("📈 股市大亨 - 完整台股診斷系統 (Web版)")
-st.caption("同步證交所/櫃買中心官方產業類別，提供技術面、大戶籌碼與財務綜合診斷")
+st.caption("同步證交所/櫃買中心官方產業類別，提供技術面、集保大戶籌碼、法人動態與財務綜合診斷")
 
 # 1. 搜尋區域
 with st.container():
@@ -920,7 +945,7 @@ if search_clicked or user_input:
         # 並行調用
         with ThreadPoolExecutor(max_workers=7) as executor:
             future_tech = executor.submit(get_tech_data, stock_id, stock_name)
-            future_chip = executor.submit(get_chip_data, stock_id)
+            future_chip = executor.submit(get_chip_data, stock_id, 10)
             future_margin = executor.submit(get_margin_trading_data, stock_id)
             future_day_trade = executor.submit(get_day_trading_data, stock_id)
             future_large_holders = executor.submit(
@@ -969,7 +994,7 @@ if search_clicked or user_input:
 
             st.markdown("---")
 
-            # 補齊：所有細節欄位卡片展示
+            # 所有細節欄位卡片展示
             c1, c2 = st.columns(2)
 
             with c1:
@@ -1000,21 +1025,21 @@ if search_clicked or user_input:
                     f"**📊 本益比/股淨比：** PE `{tech_data.get('pe_ratio', '無數據')}` | "
                     f"PB `{tech_data.get('pb_ratio', '無數據')}`"
                 )
-                st.markdown(f"**🐋 集保大戶動態：** {large_holders_data.get('summary', '無數據')}")
-                st.markdown(f"**💳 融資融券(近5日)：** {margin_data.get('summary', '無數據')}")
-                st.markdown(f"**⚡ 當沖動態：** {day_trade_data.get('summary', '無數據')}")
+                st.markdown(f"**👥 集保大戶動態：** {large_holders_data.get('summary', '無數據')}")
+                st.markdown(f"**💳 融資融券狀況：** {margin_data.get('summary', '無數據')}")
+                st.markdown(f"**⚡ 當沖交易動態：** {day_trade_data.get('summary', '無數據')}")
 
             st.markdown("---")
 
-            # --- 新增個股走勢圖區域 ---
-            df_chart = tech_data.get("df")
-            if df_chart is not None and not df_chart.empty:
-                st.subheader("📈 個股歷史走勢與均線圖 (近半年)")
-                chart_data = df_chart[["Close", "MA10", "MA20", "MA60"]].dropna(how="all")
-                st.line_chart(chart_data)
-                st.markdown("---")
+            # --- 新增：個股走勢圖 (Close, MA20, MA60) ---
+            st.subheader("📈 個股歷史走勢與均線圖 (近半年)")
+            chart_df = tech_data["df"][["Close", "MA20", "MA60"]].dropna()
+            chart_df.columns = ["收盤價", "20日均線(月線)", "60日均線(季線)"]
+            st.line_chart(chart_df)
 
-            # --- 分頁：權重分析訊號 / 三大法人籌碼 / 最新新聞 ---
+            st.markdown("---")
+
+            # --- 分頁：權重分析訊號 / 近10日三大法人籌碼表 / 最新新聞 ---
             tab1, tab2, tab3 = st.tabs(
                 [
                     "📋 權重分析訊號",
@@ -1029,8 +1054,20 @@ if search_clicked or user_input:
                     st.info(sig)
 
             with tab2:
-                st.subheader("三大法人買賣超 (單位: 張)")
+                st.subheader("近 10 日三大法人買賣超動態 (單位: 張)")
                 if not chip_df.empty:
+                    # 計算近 10 日法人買賣超總計
+                    f_sum = int(chip_df.get("Foreign_Investor", pd.Series([0])).sum())
+                    t_sum = int(chip_df.get("Investment_Trust", pd.Series([0])).sum())
+                    d_sum = int(chip_df.get("Dealer", pd.Series([0])).sum())
+                    total_sum = f_sum + t_sum + d_sum
+
+                    col_f, col_t, col_d, col_tot = st.columns(4)
+                    col_f.metric("外資 10日累計", f"{f_sum:+,} 張")
+                    col_t.metric("投信 10日累計", f"{t_sum:+,} 張")
+                    col_d.metric("自營商 10日累計", f"{d_sum:+,} 張")
+                    col_tot.metric("三大法人 10日總計", f"{total_sum:+,} 張")
+
                     st.dataframe(chip_df, use_container_width=True)
                 else:
                     st.write("尚無籌碼詳細數據。")
