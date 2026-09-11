@@ -466,6 +466,27 @@ def calculate_gap_levels(df: pd.DataFrame, max_lookback: int = 60) -> dict:
     return res
 
 
+def calculate_fibonacci_levels(df: pd.DataFrame) -> dict:
+    """計算波段近 6 個月高低點之黃金分割率 (Fibonacci Retracement)"""
+    if df.empty or len(df) < 10:
+        return {}
+
+    high_price = df["High"].max()
+    low_price = df["Low"].min()
+    diff = high_price - low_price
+
+    levels = {
+        "1.000 (高點)": high_price,
+        "0.786": high_price - (diff * 0.214),
+        "0.618 (關鍵強勢)": high_price - (diff * 0.382),
+        "0.500 (中軸分水嶺)": high_price - (diff * 0.500),
+        "0.382 (弱勢反彈)": high_price - (diff * 0.618),
+        "0.236": high_price - (diff * 0.764),
+        "0.000 (低點)": low_price,
+    }
+    return levels
+
+
 def get_large_shareholders_data(stock_id: str) -> dict:
     start_date = (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d")
     url = "https://api.finmindtrade.com/api/v4/data"
@@ -619,7 +640,6 @@ def get_financial_and_analyst_data(ticker: yf.Ticker, stock_id: str = "") -> dic
             rev_growth = info.get("revenueGrowth")
             if rev_growth is not None and not np.isnan(rev_growth):
                 raw_yoy = rev_growth * 100
-                # 若 YoY 數字異常巨大 (>500% 或 <-90%)，通常為 API 數據錯位，自動平滑防錯
                 if -90.0 <= raw_yoy <= 500.0:
                     calculated_yoy = raw_yoy
 
@@ -641,9 +661,7 @@ def get_financial_and_analyst_data(ticker: yf.Ticker, stock_id: str = "") -> dic
         if est_eps is not None and not np.isnan(est_eps) and est_eps > 0:
             fin_data["est_eps"] = f"${est_eps:.2f}"
         elif eps is not None and not np.isnan(eps) and eps > 0:
-            # 備援：若無研報 forwardEps，以近四季 EPS + 營收 YoY 動能做保守獲利預估
             growth_factor = (calculated_yoy / 100.0) if calculated_yoy is not None else 0.0
-            # 動能因子上限封頂 [-30%, +30%] 避免極端值
             growth_factor = max(-0.3, min(0.3, growth_factor))
             projected_eps = eps * (1 + growth_factor)
             fin_data["est_eps"] = f"${projected_eps:.2f} (動能推估)"
@@ -842,6 +860,17 @@ def get_tech_data(stock_id: str, stock_name: str) -> dict:
         if gap_info.get("signals"):
             signals.extend(gap_info["signals"])
 
+        # 黃金分割率計算
+        fib_levels = calculate_fibonacci_levels(df)
+        if fib_levels:
+            p_0618 = fib_levels["0.618 (關鍵強勢)"]
+            p_0500 = fib_levels["0.500 (中軸分水嶺)"]
+            p_0382 = fib_levels["0.382 (弱勢反彈)"]
+            signals.append(
+                f"• [黃金分割] 近半年波段 0.618 支撐/壓力位在 ${p_0618:.2f}，"
+                f"0.50 中軸位在 ${p_0500:.2f}，0.382 位在 ${p_0382:.2f}"
+            )
+
         high_6m = df["High"].max()
         low_6m = df["Low"].min()
         diff = high_6m - low_6m
@@ -863,6 +892,7 @@ def get_tech_data(stock_id: str, stock_name: str) -> dict:
             "bias_str": bias_str,
             "vol_levels": vol_levels,
             "gap_info": gap_info,
+            "fib_levels": fib_levels,
             "bull_target": bull_target,
             "bear_target": bear_target,
             "analyst_target": fin_data["analyst_target"],
@@ -960,14 +990,14 @@ def get_stock_news(stock_id: str, max_news: int = 5) -> list:
     return news_titles
 
 
-def plot_candlestick_chart(df: pd.DataFrame, stock_id: str, stock_name: str):
+def plot_candlestick_chart(df: pd.DataFrame, stock_id: str, stock_name: str, fib_levels: dict = None):
     fig = make_subplots(
         rows=2,
         cols=1,
         shared_xaxes=True,
         vertical_spacing=0.05,
         row_heights=[0.7, 0.3],
-        subplot_titles=(f"{stock_id} {stock_name} K線與均線走勢", "成交量"),
+        subplot_titles=(f"{stock_id} {stock_name} K線與黃金分割率關卡", "成交量"),
     )
 
     fig.add_trace(
@@ -992,7 +1022,7 @@ def plot_candlestick_chart(df: pd.DataFrame, stock_id: str, stock_name: str):
                 y=df["MA10"],
                 mode="lines",
                 name="MA10",
-                line=dict(color="#f0ad4e", width=1.5),
+                line=dict(color="#f0ad4e", width=1.2),
             ),
             row=1,
             col=1,
@@ -1004,7 +1034,7 @@ def plot_candlestick_chart(df: pd.DataFrame, stock_id: str, stock_name: str):
                 y=df["MA20"],
                 mode="lines",
                 name="MA20",
-                line=dict(color="#0275d8", width=1.5),
+                line=dict(color="#0275d8", width=1.2),
             ),
             row=1,
             col=1,
@@ -1016,11 +1046,33 @@ def plot_candlestick_chart(df: pd.DataFrame, stock_id: str, stock_name: str):
                 y=df["MA60"],
                 mode="lines",
                 name="MA60",
-                line=dict(color="#5bc0de", width=1.5),
+                line=dict(color="#5bc0de", width=1.2),
             ),
             row=1,
             col=1,
         )
+
+    # 繪製黃金分割率水平線 (Fibonacci Retracement Lines)
+    if fib_levels:
+        colors_map = {
+            "1.000 (高點)": "rgba(217, 83, 79, 0.6)",
+            "0.786": "rgba(240, 173, 78, 0.5)",
+            "0.618 (關鍵強勢)": "rgba(91, 192, 222, 0.8)",
+            "0.500 (中軸分水嶺)": "rgba(153, 102, 255, 0.8)",
+            "0.382 (弱勢反彈)": "rgba(91, 192, 222, 0.8)",
+            "0.236": "rgba(240, 173, 78, 0.5)",
+            "0.000 (低點)": "rgba(92, 184, 92, 0.6)",
+        }
+        for level_name, price_val in fib_levels.items():
+            fig.add_hline(
+                y=price_val,
+                line_dash="dash",
+                line_color=colors_map.get(level_name, "gray"),
+                annotation_text=f"Fib {level_name}: ${price_val:.2f}",
+                annotation_position="bottom right" if "0.5" in level_name else "top right",
+                row=1,
+                col=1,
+            )
 
     colors = [
         "#d9534f" if c >= o else "#5cb85c"
@@ -1039,7 +1091,7 @@ def plot_candlestick_chart(df: pd.DataFrame, stock_id: str, stock_name: str):
 
     fig.update_layout(
         xaxis_rangeslider_visible=False,
-        height=500,
+        height=550,
         margin=dict(l=20, r=20, t=40, b=20),
         showlegend=True,
     )
@@ -1119,7 +1171,7 @@ def analyze_trend(
 # 4. Streamlit Web UI 主介面
 # ==========================================
 st.title("📈 股市大亨 - 完整台股診斷系統 (Web版)")
-st.caption("同步證交所/櫃買中心官方產業類別，提供技術面、法人與信用籌碼綜合診斷")
+st.caption("同步證交所/櫃買中心官方產業類別，提供技術面、黃金分割率、法人與信用籌碼綜合診斷")
 
 with st.container():
     col_input, col_btn = st.columns([4, 1])
@@ -1208,6 +1260,14 @@ if search_clicked or user_input.strip():
                     f"**📈 20MA 乖離率：** {tech_data.get('bias_str', '--')}"
                 )
 
+                fib = tech_data.get("fib_levels", {})
+                if fib:
+                    st.markdown(
+                        f"**📐 黃金分割關卡：** 0.618 `${fib['0.618 (關鍵強勢)']:.2f}` | "
+                        f"0.50 `${fib['0.500 (中軸分水嶺)']:.2f}` | "
+                        f"0.382 `${fib['0.382 (弱勢反彈)']:.2f}`"
+                    )
+
                 vol_info = tech_data.get("vol_levels", {})
                 if vol_info.get("vol_resistance"):
                     v_res = vol_info["vol_resistance"]
@@ -1246,8 +1306,10 @@ if search_clicked or user_input.strip():
 
             st.markdown("---")
 
-            st.subheader("📈 個股技術走勢圖")
-            fig = plot_candlestick_chart(tech_data["df"], stock_id, stock_name)
+            st.subheader("📈 個股技術走勢與黃金分割率關卡圖")
+            fig = plot_candlestick_chart(
+                tech_data["df"], stock_id, stock_name, fib_levels=tech_data.get("fib_levels")
+            )
             st.plotly_chart(fig, use_container_width=True)
 
             st.markdown("---")
